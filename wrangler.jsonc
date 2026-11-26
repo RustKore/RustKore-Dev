@@ -11,7 +11,7 @@
 		"GITHUB_OAUTH_CLIENT_ID": "Ov23ligWeQeA1W2oSAsI",
 		"GITHUB_OAUTH_CALLBACK_URL": "https://rustkore.boscv.workers.dev/auth/callback",
 		"RUSTKORE_ADMIN_GITHUB_IDS": "234458543",
-		"GITHUB_REPOSITORY": "boscv/RustKore"
+		"GITHUB_REPOSITORY": "boscv/RustKore-DEV"
 	},
 	"observability": {
 		"enabled": true
