@@ -1,0 +1,211 @@
+{
+  "schemaVersion": 1,
+  "catalogVersion": "1.0.0",
+  "source": {
+    "repository": "https://github.com/OpenKore/openkore",
+    "branch": "master",
+    "initialResearchRevision": "396c4c64f39a9dbc0b3f522754e4da5dfc3e1096",
+    "revisionRole": "Provenance reference for the initial survey only; not a development pin.",
+    "reference": "https://github.com/OpenKore/openkore/tree/master"
+  },
+  "milestones": [
+    {
+      "id": "foundation",
+      "name": "Foundation",
+      "version": null,
+      "objective": "Architecture, licensing, tests and foundations",
+      "status": "developing",
+      "order": 1
+    },
+    {
+      "id": "prototype",
+      "name": "Prototype",
+      "version": "v0.1",
+      "objective": "Connection, world interpretation and movement",
+      "status": "planned",
+      "order": 2
+    },
+    {
+      "id": "alpha",
+      "name": "Alpha",
+      "version": "v0.2",
+      "objective": "First usable combat and gathering release",
+      "status": "planned",
+      "order": 3
+    },
+    {
+      "id": "beta",
+      "name": "Beta",
+      "version": "v0.5",
+      "objective": "Complete automation cycles",
+      "status": "planned",
+      "order": 4
+    },
+    {
+      "id": "rc",
+      "name": "Release Candidate",
+      "version": "v0.9",
+      "objective": "Broad functional compatibility",
+      "status": "planned",
+      "order": 5
+    },
+    {
+      "id": "stable",
+      "name": "Stable",
+      "version": "v1.0",
+      "objective": "First stable release",
+      "status": "planned",
+      "order": 6
+    }
+  ],
+  "categories": [
+    {
+      "id": "networking",
+      "name": "Networking & Protocol",
+      "order": 1
+    },
+    {
+      "id": "world",
+      "name": "World & Character",
+      "order": 2
+    },
+    {
+      "id": "navigation",
+      "name": "Navigation & Routing",
+      "order": 3
+    },
+    {
+      "id": "combat",
+      "name": "Combat",
+      "order": 4
+    },
+    {
+      "id": "skills",
+      "name": "Skills",
+      "order": 5
+    },
+    {
+      "id": "ai",
+      "name": "AI & Automation",
+      "order": 6
+    },
+    {
+      "id": "inventory",
+      "name": "Inventory & Equipment",
+      "order": 7
+    },
+    {
+      "id": "loot",
+      "name": "Loot & Gathering",
+      "order": 8
+    },
+    {
+      "id": "npcs",
+      "name": "NPCs & Quests",
+      "order": 9
+    },
+    {
+      "id": "storage",
+      "name": "Storage & Kafra",
+      "order": 10
+    },
+    {
+      "id": "commerce",
+      "name": "Commerce & Economy",
+      "order": 11
+    },
+    {
+      "id": "social",
+      "name": "Party & Social",
+      "order": 12
+    },
+    {
+      "id": "companions",
+      "name": "Companions",
+      "order": 13
+    },
+    {
+      "id": "crafting",
+      "name": "Crafting & Special Systems",
+      "order": 14
+    },
+    {
+      "id": "configuration",
+      "name": "Configuration & Data",
+      "order": 15
+    },
+    {
+      "id": "scripting",
+      "name": "Scripting & Extensions",
+      "order": 16
+    },
+    {
+      "id": "ui",
+      "name": "User Interface",
+      "order": 17
+    },
+    {
+      "id": "reliability",
+      "name": "Reliability & Performance",
+      "order": 18
+    }
+  ],
+  "features": [
+    {
+      "id": "testing.roadmap-import",
+      "categoryId": "networking",
+      "title": "Roadmap importer preservation fixture",
+      "description": "Fixture used to verify local catalog imports.",
+      "milestoneId": "foundation",
+      "required": true,
+      "acceptanceCriteria": [
+        "The import remains idempotent and preserves separate state and task associations."
+      ],
+      "upstreamReferences": []
+    }
+  ],
+  "releaseAcceptanceCriteria": {
+    "foundation": [],
+    "prototype": [
+      "Connect to a server.",
+      "Select a character.",
+      "Enter a map.",
+      "Identify actors.",
+      "Move.",
+      "Confirm arrival."
+    ],
+    "alpha": [
+      "Connect.",
+      "Navigate within a map.",
+      "Select targets.",
+      "Fight.",
+      "Use skills.",
+      "Collect items.",
+      "Recover HP/SP.",
+      "Repeat the cycle autonomously."
+    ],
+    "beta": [
+      "Leave town.",
+      "Reach the lockMap.",
+      "Fight.",
+      "Collect items.",
+      "Return.",
+      "Store items.",
+      "Sell items.",
+      "Buy supplies.",
+      "Restart the cycle."
+    ],
+    "rc": [
+      "Validate the advanced systems defined in the feature catalogue.",
+      "Validate extensibility.",
+      "Validate compatibility.",
+      "Validate stability."
+    ],
+    "stable": [
+      "Validate all accumulated mandatory requirements.",
+      "Validate documentation.",
+      "Validate multiplatform distribution.",
+      "Validate regression results."
+    ]
+  }
+}

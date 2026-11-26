@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#111315">
+<meta name="description" content="Explore RustKore's functional roadmap and release milestones."><title>Feature Roadmap | RustKore</title>
+<link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/roadmap.css"><script type="module" src="/roadmap.js"></script>
+</head>
+<body class="roadmap-page">
+<a class="skip-link" href="#roadmap-main">Skip to content</a>
+<header class="site-header"><a class="brand" href="/" aria-label="RustKore overview"><span class="brand-mark" aria-hidden="true">RK</span><span>RustKore</span></a><nav aria-label="Main navigation"><a href="/#overview">Overview</a><a href="/#tasks">Tasks</a><a href="/#pipeline">Pipeline</a><a href="/#contributors">Contributors</a><a href="/#get-started">Get started</a><a class="current-page" href="/roadmap.html" aria-current="page">Roadmap</a><a id="roadmap-admin-link" href="/#administration" hidden>Administration</a></nav><div class="account-actions"><a id="roadmap-login" class="button button-small" href="/auth/github">Sign in with GitHub</a><a id="roadmap-account-link" class="button button-small" href="/#account" hidden>Account</a></div></header>
+<main id="roadmap-main" class="page-shell roadmap-shell">
+<div id="scenario-switch" class="roadmap-scenario-switch" hidden><span>Local preview scenario:</span><button type="button" data-scenario="actual">Initial state</button><button type="button" data-scenario="demo">Fictional demonstration</button><span id="scenario-banner" role="status" hidden>Fictional demonstration data · illustrative states and evidence, not production facts</span></div>
+
+<section class="roadmap-hero roadmap-section" aria-labelledby="roadmap-title">
+ <div class="roadmap-hero-copy">
+  <p class="roadmap-eyebrow">THE ROAD AHEAD</p>
+  <h1 id="roadmap-title">From first steps to full automation.</h1>
+  <p class="roadmap-hero-description">Explore the capabilities RustKore needs to become a complete, stable alternative to OpenKore.</p>
+  <dl class="roadmap-counts" aria-label="Roadmap catalog counts">
+   <div><dt>Capabilities</dt><dd id="capability-count">—</dd></div>
+   <div><dt>Categories</dt><dd id="category-count">—</dd></div>
+   <div><dt>Milestones</dt><dd id="milestone-count">—</dd></div>
+  </dl>
+ </div>
+ <div class="roadmap-hero-art" id="roadmap-hero-art" aria-label="Six planned release milestones rising along a connected route"></div>
+</section>
+
+<section class="roadmap-section" aria-labelledby="milestones-title">
+ <div class="roadmap-section-heading"><div><p class="section-kicker">01 / RELEASE PLAN</p><h2 id="milestones-title">Release milestones</h2></div><p>The path toward the first stable release. Select a milestone to inspect its column in Feature Coverage.</p></div>
+ <ol id="milestone-list" class="milestone-timeline" aria-label="Release milestones"></ol>
+</section>
+
+<section class="roadmap-section" aria-label="Implementation status and first usable release">
+ <div class="roadmap-panels">
+  <article class="roadmap-panel" aria-labelledby="implementation-title">
+   <header class="roadmap-panel-heading"><div><p class="section-kicker">02 / FUNCTIONAL STATUS</p><h2 id="implementation-title">Implementation status</h2><p>Current distribution of all functional requirements.</p></div></header>
+   <div class="status-content"><div id="implementation-donut" class="implementation-donut"></div><div id="implementation-legend" class="implementation-legend"></div></div>
+  </article>
+  <article class="roadmap-panel first-release-panel" aria-labelledby="first-release-title">
+   <header class="roadmap-panel-heading"><div><p class="section-kicker">03 / FIRST USABLE RELEASE</p><h2 id="first-release-title">What will Alpha be able to do?</h2><p>The essential autonomous gameplay loop.</p></div></header>
+   <div id="first-release-flow" class="first-release-flow"></div>
+   <div class="release-target"><span>Target release: <strong>v0.2 Alpha</strong></span><span>Alpha readiness: <strong id="alpha-readiness">—</strong></span></div>
+  </article>
+ </div>
+</section>
+
+<section id="coverage" class="roadmap-section" aria-labelledby="coverage-title">
+ <div class="roadmap-section-heading"><div><p class="section-kicker">04 / FUNCTIONAL SCOPE</p><h2 id="coverage-title">Feature coverage</h2></div><p>Each cell counts requirements introduced at that milestone.</p></div>
+ <div class="roadmap-filters"><label for="filter-category">Category<select id="filter-category"><option value="">All categories</option></select></label><label for="filter-milestone">Milestone<select id="filter-milestone"><option value="">All milestones</option></select></label><label for="filter-state">State<select id="filter-state"><option value="">All states</option><option value="planned">Planned</option><option value="developing">Developing</option><option value="testing">Testing</option><option value="verified">Verified</option></select></label><button id="clear-roadmap-filters" class="button button-quiet" type="button">Clear filters</button></div>
+ <div class="table-scroll" role="region" aria-label="Feature coverage matrix" tabindex="0"><table class="coverage-table"><thead><tr><th scope="col">Feature category</th><th scope="col" data-milestone-column="foundation">Foundation</th><th scope="col" data-milestone-column="prototype">Prototype</th><th scope="col" data-milestone-column="alpha">Alpha</th><th scope="col" data-milestone-column="beta">Beta</th><th scope="col" data-milestone-column="rc">RC</th><th scope="col" data-milestone-column="stable">Stable</th></tr></thead><tbody id="coverage-body"><tr><td colspan="7">Loading feature catalog…</td></tr></tbody></table></div>
+ <p id="feature-page-status" class="roadmap-note" aria-live="polite"></p><div class="roadmap-pagination"><button id="load-more-features" class="button button-quiet" type="button" hidden>Load more requirements</button></div>
+ <div id="roadmap-admin" class="roadmap-admin" hidden aria-labelledby="roadmap-admin-title"><div class="roadmap-admin-heading"><div><p class="section-kicker">MAINTAINER / RESTRICTED</p><h3 id="roadmap-admin-title">Roadmap change history</h3></div><button id="load-roadmap-history" class="button button-quiet" type="button">Load history</button></div><ol id="roadmap-history-list" class="roadmap-history-list"></ol><button id="roadmap-history-more" class="button button-quiet" type="button" hidden>Load older changes</button></div>
+</section>
+
+<section class="roadmap-section" aria-labelledby="acceptance-title">
+ <div class="roadmap-section-heading"><div><p class="section-kicker">05 / RELEASE GATES</p><h2 id="acceptance-title">Release acceptance criteria</h2></div></div>
+ <article class="acceptance-panel"><header class="acceptance-heading"><div><h3 id="acceptance-milestone">—</h3><p id="acceptance-objective"></p></div><p id="acceptance-caption">Required scope accumulates from earlier milestones; optional items do not block a release.</p></header><ul id="acceptance-list" class="acceptance-list"></ul></article>
+</section>
+</main>
+<footer class="site-footer"><a class="brand" href="/"><span class="brand-mark" aria-hidden="true">RK</span><span>RustKore</span></a><span>Built together. Engineered for the future.</span><div><a href="https://github.com/boscv/RustKore" target="_blank" rel="noreferrer"><strong>RustKore</strong><span>Open-source Rust software ↗</span></a><a href="https://github.com/boscv/RustKore-DEV" target="_blank" rel="noreferrer"><strong>RustKore-DEV</strong><span>Collaboration platform ↗</span></a></div></footer>
+<div id="roadmap-notice" class="notice" role="status" aria-live="polite"></div>
+</body></html>

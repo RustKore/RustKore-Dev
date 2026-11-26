@@ -6,8 +6,11 @@
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "start": "wrangler dev",
+    "demo:local": "wrangler d1 execute rustkore-db --local --file=scripts/seed-local-demo.sql",
     "test": "vitest run",
-    "cf-typegen": "wrangler types"
+    "cf-typegen": "wrangler types",
+    "demo:roadmap": "wrangler d1 execute rustkore-db --local --file=scripts/seed-local-roadmap-demo.sql",
+    "demo:roadmap:reset": "wrangler d1 execute rustkore-db --local --file=scripts/reset-local-roadmap-demo.sql"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.4.3",

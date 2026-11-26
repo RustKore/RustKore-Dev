@@ -7,6 +7,12 @@ import githubDashboardMigration from "../migrations/0003_github_dashboard.sql?ra
 import normalizedUniquenessMigration from "../migrations/0004_normalized_contribution_uniqueness.sql?raw";
 import activeTokenLimitMigration from "../migrations/0005_active_token_limit.sql?raw";
 import githubIdentityCredentialMigration from "../migrations/0006_github_identity_credentials.sql?raw";
+import dashboardEnhancementsMigration from "../migrations/0007_task_complexity_recognition.sql?raw";
+import publicHistoryIndexesMigration from "../migrations/0008_public_history_indexes.sql?raw";
+import activityTimelineIndexesMigration from "../migrations/0009_activity_timeline_indexes.sql?raw";
+import collaboratorPublicLoginIndexMigration from "../migrations/0010_collaborator_public_login_index.sql?raw";
+import featureRoadmapMigration from "../migrations/0011_feature_roadmap.sql?raw";
+import roadmapCatalogFixture from "./fixtures/feature-roadmap-import.json";
 
 const db = (env as any).rustkore_db as D1Database;
 let githubHeadSha: string | null = null;
@@ -53,9 +59,26 @@ async function credential(name: string, role: "collaborator" | "reviewer", agent
 	if (role === "collaborator") {
 		const commitSha = githubUserId.toString(16).padStart(40, "0"), pullNumber = githubUserId;
 		commitOwners.set(commitSha, githubUserId); pullHeads.set(pullNumber, commitSha);
-		return { token, tokenId, githubUserId, commitSha, pullRequestUrl: `https://github.com/boscv/RustKore/pull/${pullNumber}` };
+		return { token, tokenId, collaboratorId, agentId, githubUserId, commitSha, pullRequestUrl: `https://github.com/boscv/RustKore/pull/${pullNumber}` };
 	}
-	return { token, tokenId, githubUserId };
+	return { token, tokenId, collaboratorId, githubUserId };
+}
+
+async function createWebSession(collaboratorId: string) {
+	const session = `local-session-${crypto.randomUUID()}`, csrf = `local-csrf-${crypto.randomUUID()}`;
+	const digest = async (value: string) => {
+		const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+		return [...new Uint8Array(bytes)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+	};
+	await db.prepare("INSERT INTO web_sessions (session_hash,csrf_hash,collaborator_id,expires_at,created_at) VALUES (?,?,?,unixepoch()+3600,unixepoch())")
+		.bind(await digest(session), await digest(csrf), collaboratorId).run();
+	return { cookie: `rk_session=${session}; rk_csrf=${csrf}`, csrf };
+}
+async function webRequest(path: string, method: string, session: { cookie: string; csrf: string }, body?: unknown) {
+	return worker.fetch(new Request(`https://rustkore.test${path}`, {
+		method, headers: { cookie: session.cookie, origin: "https://rustkore.test", "x-csrf-token": session.csrf, ...(body ? { "content-type": "application/json" } : {}) },
+		...(body ? { body: JSON.stringify(body) } : {}),
+	}), runtimeEnv as any);
 }
 
 function migrationQueries(source: string) {
@@ -67,8 +90,8 @@ function migrationQueries(source: string) {
 	}
 	if (pending.trim()) queries.push(pending.trim()); return queries;
 }
-async function addTask(title: string, priority = 50, dependencies?: string[]) {
-	const response = await request("/admin/tasks", "POST", adminToken, { title, description: `Work on ${title}`, acceptanceCriteria: "Implementation is reviewed", priority, dependencies });
+async function addTask(title: string, priority = 50, dependencies?: string[], module = "General") {
+	const response = await request("/admin/tasks", "POST", adminToken, { title, description: `Work on ${title}`, acceptanceCriteria: "Implementation is reviewed", priority, dependencies, module });
 	if (response.status !== 201) throw new Error(`Task creation failed: ${await response.text()}`);
 	return json<any>(response);
 }
@@ -81,6 +104,11 @@ beforeAll(async () => {
 		{ name: "0004_normalized_contribution_uniqueness.sql", queries: migrationQueries(normalizedUniquenessMigration) },
 		{ name: "0005_active_token_limit.sql", queries: [activeTokenLimitMigration.trim()] },
 		{ name: "0006_github_identity_credentials.sql", queries: migrationQueries(githubIdentityCredentialMigration) },
+		{ name: "0007_task_complexity_recognition.sql", queries: migrationQueries(dashboardEnhancementsMigration) },
+		{ name: "0008_public_history_indexes.sql", queries: migrationQueries(publicHistoryIndexesMigration) },
+		{ name: "0009_activity_timeline_indexes.sql", queries: migrationQueries(activityTimelineIndexesMigration) },
+		{ name: "0010_collaborator_public_login_index.sql", queries: migrationQueries(collaboratorPublicLoginIndexMigration) },
+		{ name: "0011_feature_roadmap.sql", queries: migrationQueries(featureRoadmapMigration) },
 	]);
 	const collaboratorId = crypto.randomUUID(), tokenId = crypto.randomUUID();
 	adminToken = `local-admin-token-${crypto.randomUUID()}`;
@@ -413,6 +441,91 @@ describe("RustKore coordinator and stateless MCP", () => {
 		expect(progress.output.tasks.find((row: any) => row.state === "integrated").count).toBe(finalDashboard.summary.integrated);
 	});
 
+	it("aggregates only registered cross-module task dependencies for the project map", async () => {
+		const foundation = await addTask("map module foundation", 35, undefined, "Map Core");
+		const runtime = await addTask("map module runtime", 35, [foundation.id], "Map Runtime");
+		await addTask("independent map tooling", 35, undefined, "Map Tooling");
+		await addTask("same-module dependency", 35, [foundation.id], "Map Core");
+		const cycleA = await addTask("map cycle A root", 35, undefined, "Map Cycle A");
+		const cycleB = await addTask("map cycle B root", 35, undefined, "Map Cycle B");
+		await addTask("map cycle A consumer", 35, [cycleB.id], "Map Cycle A");
+		await addTask("map cycle B consumer", 35, [cycleA.id], "Map Cycle B");
+		const dashboard = await json<any>(await request("/api/dashboard", "GET"));
+		expect(dashboard.moduleDependencies).toContainEqual({ module: "Map Runtime", dependsOnModule: "Map Core", taskDependencies: 1 });
+		expect(dashboard.moduleDependencies).not.toContainEqual(expect.objectContaining({ module: "Map Tooling" }));
+		expect(dashboard.moduleDependencies).not.toContainEqual(expect.objectContaining({ module: "Map Core" }));
+		expect(dashboard.moduleDependencies).toContainEqual({ module: "Map Cycle A", dependsOnModule: "Map Cycle B", taskDependencies: 1 });
+		expect(dashboard.moduleDependencies).toContainEqual({ module: "Map Cycle B", dependsOnModule: "Map Cycle A", taskDependencies: 1 });
+		expect(dashboard.modules.some((module: any) => module.module === "Map Runtime")).toBe(true);
+		expect(dashboard.modules.some((module: any) => module.module === "Map Core")).toBe(true);
+	});
+
+	it("serves paginated task filters, public dependency details, profiles, and real integration history", async () => {
+		const parent = await request("/admin/tasks", "POST", adminToken, { title: "Catalog root one", module: "Catalog", priority: 50, complexity: "small", description: "A filtered catalog task", acceptanceCriteria: "Visible in search" });
+		const parentTask = await json<any>(parent);
+		const second = await request("/admin/tasks", "POST", adminToken, { title: "Catalog root two", module: "Catalog", priority: 40, complexity: "small", description: "A second filtered task", acceptanceCriteria: "Visible on the next page" });
+		const secondTask = await json<any>(second);
+		const childResponse = await request("/admin/tasks", "POST", adminToken, { title: "Catalog blocked child", module: "Catalog", priority: 60, complexity: "medium", description: "Waits on a parent", acceptanceCriteria: "Shows its prerequisite", dependencies: [parentTask.id] });
+		const child = await json<any>(childResponse);
+
+		const pageOne = await json<any>(await request("/api/tasks?module=Catalog&complexity=small&limit=1", "GET"));
+		const pageTwo = await json<any>(await request(`/api/tasks?module=Catalog&complexity=small&limit=1&cursor=${encodeURIComponent(pageOne.nextCursor)}`, "GET"));
+		expect(pageOne.tasks).toHaveLength(1);
+		expect(pageOne.nextCursor).toBeTruthy();
+		expect(pageTwo.tasks).toHaveLength(1);
+		expect(pageOne.tasks[0].id).not.toBe(pageTwo.tasks[0].id);
+		const blocked = await json<any>(await request("/api/tasks?state=blocked&q=Catalog%20blocked%20child", "GET"));
+		expect(blocked.tasks.map((task: any) => task.id)).toContain(child.id);
+		const detail = await json<any>(await request(`/api/tasks/${child.id}`, "GET"));
+		expect(detail.state).toBe("blocked");
+		expect(detail.complexity).toBe("medium");
+		expect(detail.dependencies).toEqual([expect.objectContaining({ id: parentTask.id, state: "available" })]);
+		const parentDetail = await json<any>(await request(`/api/tasks/${parentTask.id}`, "GET"));
+		expect(parentDetail.dependents).toEqual([expect.objectContaining({ id: child.id, state: "blocked" })]);
+
+		const dashboard = await json<any>(await request("/api/dashboard", "GET"));
+		const stateTotal = [dashboard.summary.available, dashboard.summary.blocked, dashboard.summary.reserved, dashboard.summary.inReview, dashboard.summary.approved, dashboard.summary.integrated].reduce((sum: number, value: number) => sum + Number(value), 0);
+		expect(stateTotal).toBe(Number(dashboard.summary.total));
+		expect(dashboard.integrationHistory.daily).toBeInstanceOf(Array);
+		expect(dashboard.integrationHistory.monthly).toBeInstanceOf(Array);
+		expect(dashboard.recentActivity).toBeInstanceOf(Array);
+		expect(dashboard.summary.contributors).toBeGreaterThan(0);
+		const contributor = await json<any>(await request("/api/contributors/external-collaborator", "GET"));
+		expect(contributor.integratedCount).toBe(1);
+		expect(contributor.contributions[0].pullRequestUrl).toContain("github.com/");
+	});
+
+	it("protects task registry, context, and permanent recognition management", async () => {
+		const adminId = (await db.prepare("SELECT id FROM collaborators WHERE github_user_id=99999").first<any>()).id;
+		const adminSession = await createWebSession(adminId), contributor = await credential("Recognition recipient", "collaborator", "recognition-agent"), contributorSession = await createWebSession(contributor.collaboratorId);
+		const denied = await webRequest("/api/admin/context", "GET", contributorSession);
+		expect(denied.status).toBe(403);
+		const savedContext = await webRequest("/api/admin/context", "PUT", adminSession, { content: "Local test context for dashboard." });
+		expect(savedContext.status).toBe(200);
+		const contextToken = await credential("Context verification", "collaborator", "context-reader");
+		expect((await tool(contextToken.token, "get_project_context")).output.content).toContain("Local test context");
+
+		const parent = await request("/admin/tasks", "POST", adminToken, { title: "Admin graph parent", module: "Admin", priority: 20, complexity: "large", description: "Parent", acceptanceCriteria: "Graph stays valid" });
+		const parentTask = await json<any>(parent);
+		const child = await request("/admin/tasks", "POST", adminToken, { title: "Admin graph child", module: "Admin", priority: 10, description: "Child", acceptanceCriteria: "Graph stays valid" });
+		const childTask = await json<any>(child);
+		const updated = await webRequest(`/api/admin/tasks/${childTask.id}`, "PATCH", adminSession, { complexity: "small", dependencies: [parentTask.id] });
+		expect(updated.status).toBe(200);
+		const childDetail = await json<any>(await request(`/api/tasks/${childTask.id}`, "GET"));
+		expect(childDetail.complexity).toBe("small");
+		expect(childDetail.dependencies[0].id).toBe(parentTask.id);
+		const cycle = await webRequest(`/api/admin/tasks/${parentTask.id}`, "PATCH", adminSession, { dependencies: [childTask.id] });
+		expect(cycle.status).toBe(400);
+		expect((await json<any>(await request(`/api/tasks/${parentTask.id}`, "GET"))).dependencies).toEqual([]);
+
+		const award = await webRequest(`/api/admin/collaborators/${contributor.collaboratorId}/recognitions`, "POST", adminSession, { code: "builder", rationale: "Recognized for a verified local test contribution." });
+		expect(award.status).toBe(201);
+		const duplicate = await webRequest(`/api/admin/collaborators/${contributor.collaboratorId}/recognitions`, "POST", adminSession, { code: "builder", rationale: "Duplicate award should be rejected." });
+		expect(duplicate.status).toBe(409);
+		const profile = await json<any>(await request("/api/contributors/recognition-recipient", "GET"));
+		expect(profile.recognitions).toEqual([expect.objectContaining({ code: "builder", rationale: "Recognized for a verified local test contribution." })]);
+	});
+
 	it.each([10, 50, 100, 500])("handles a burst of %i independent agents without double claims", async (count) => {
 		await db.prepare("UPDATE tasks SET status='accepted',assignee_agent_id=NULL,lease_id=NULL,lease_until=NULL WHERE status IN ('open','claimed')").run();
 		const collaborators: any[] = [];
@@ -442,4 +555,211 @@ describe("RustKore coordinator and stateless MCP", () => {
 		expect(new Set(taskIds).size).toBe(count);
 		expect([...taskIds].sort()).toEqual(collaborators.map((row) => row.taskId).sort());
 	});
+
+	it("paginates thousands of registered tasks without gaps or duplicates", async () => {
+		const adminId = (await db.prepare("SELECT id FROM collaborators WHERE github_user_id=99999").first<any>()).id;
+		for (let offset = 0; offset < 1500; offset += 100) {
+			const batch = Array.from({ length: Math.min(100, 1500 - offset) }, (_, index) => {
+				const number = offset + index, id = `scale-${String(number).padStart(4, "0")}`;
+				return db.prepare("INSERT INTO tasks (id,title,description,acceptance_criteria,priority,status,created_by,created_at,updated_at,module) VALUES (?,?,?,'Registered',50,'open',?,1800000000,1800000000,'Scale sample')")
+					.bind(id, `Scale task ${number}`, "Local pagination test", adminId);
+			});
+			await db.batch(batch);
+		}
+		const ids = new Set<string>(); let cursor = "", pages = 0;
+		do {
+			const suffix = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
+			const page = await json<any>(await request(`/api/tasks?module=Scale%20sample&limit=100${suffix}`, "GET"));
+			expect(page.tasks.length).toBeLessThanOrEqual(100);
+			page.tasks.forEach((task: any) => ids.add(task.id));
+			cursor = page.nextCursor ?? ""; pages++;
+		} while (cursor);
+		expect(ids.size).toBe(1500);
+		expect(pages).toBe(15);
+	});
+
+	it("paginates public activity and contributions on the backend with combined filters", async () => {
+		const adminId = (await db.prepare("SELECT id FROM collaborators WHERE github_user_id=99999").first<any>()).id;
+		const actor = await credential("Public history actor", "collaborator", "history-agent");
+		const task = await addTask("Public history pagination task", 50, undefined, "HistoryPage");
+		await db.batch(Array.from({ length: 30 }, (_, index) => db.prepare("INSERT INTO activity (id,task_id,actor_id,action,details_json,created_at) VALUES (?,?,?,'task.claimed','{}',?)")
+			.bind(`page-event-${String(index).padStart(2,"0")}`, task.id, actor.collaboratorId, 1900000000 - index)));
+		const first = await json<any>(await request("/api/activity?limit=25&type=task.claimed&module=HistoryPage&contributor=public-history-actor&period=all", "GET"));
+		const second = await json<any>(await request(`/api/activity?limit=25&type=task.claimed&module=HistoryPage&contributor=public-history-actor&period=all&cursor=${encodeURIComponent(first.nextCursor)}`, "GET"));
+		expect(first.items).toHaveLength(25); expect(second.items).toHaveLength(5); expect(first.nextCursor).toBeTruthy();
+		expect(first.items[0].createdAt).toBeGreaterThan(first.items[24].createdAt);
+		expect([...first.items,...second.items].every((item:any)=>item.module==="HistoryPage"&&item.actor==="public-history-actor")).toBe(true);
+
+		const contributionIds:string[]=[];
+		for(let index=0;index<27;index++){
+			const taskRow=await addTask(`Contribution page ${index}`,50,undefined,"HistoryPage"), submissionId=`public-page-submission-${String(index).padStart(2,"0")}`, sha=(index+1).toString(16).padStart(40,"0"); contributionIds.push(submissionId);
+			await db.prepare("UPDATE tasks SET status='claimed',assignee_agent_id=?,lease_id=?,lease_until=unixepoch()+3600 WHERE id=?").bind(actor.agentId,`history-lease-${index}`,taskRow.id).run();
+			await db.prepare("INSERT INTO submissions (id,task_id,agent_id,commit_sha,pull_request_url,summary,status,created_at,submitted_github_user_id,submitted_github_login) VALUES (?,?,?,?,NULL,'Public page test','pending',?,?,?)")
+				.bind(submissionId,taskRow.id,actor.agentId,sha,1900000000-index,actor.githubUserId,"public-history-actor").run();
+		}
+		const contributions = await json<any>(await request("/api/contributions?limit=25&module=HistoryPage&contributor=public-history-actor&status=pending&period=all","GET"));
+		const older = await json<any>(await request(`/api/contributions?limit=25&module=HistoryPage&contributor=public-history-actor&status=pending&period=all&cursor=${encodeURIComponent(contributions.nextCursor)}`,"GET"));
+		expect(contributions.items).toHaveLength(25); expect(older.items).toHaveLength(2); expect(new Set([...contributions.items,...older.items].map((item:any)=>item.id)).size).toBe(27);
+	});
+
+	it("provides a stable ten-person ranking cursor and excludes expired reservations", async () => {
+		const adminId = (await db.prepare("SELECT id FROM collaborators WHERE github_user_id=99999").first<any>()).id;
+		for(let index=0;index<12;index++){
+			const collaboratorId=`rank-page-person-${String(index).padStart(2,"0")}`,agentId=`rank-page-agent-${String(index).padStart(2,"0")}`,taskId=`rank-page-task-${String(index).padStart(2,"0")}`,submissionId=`rank-page-submission-${String(index).padStart(2,"0")}`,sha=(index+500).toString(16).padStart(40,"0"),userId=81000+index;
+			await db.batch([
+				db.prepare("INSERT INTO collaborators (id,name,created_at,github_user_id,github_login) VALUES (?, ?,unixepoch(),?,?)").bind(collaboratorId,`Rank Person ${index}`,userId,`rank-person-${String(index).padStart(2,"0")}`),
+				db.prepare("INSERT INTO agents (id,collaborator_id,name,created_at) VALUES (?,?,?,unixepoch())").bind(agentId,collaboratorId,`Rank Agent ${index}`),
+				db.prepare("INSERT INTO tasks (id,title,description,acceptance_criteria,priority,status,created_by,assignee_agent_id,lease_id,lease_until,created_at,updated_at,module) VALUES (?,?,?,'Verified',50,'claimed',?,?,?,unixepoch()+3600,unixepoch(),unixepoch(),'Ranking')").bind(taskId,`Rank task ${index}`,"Ranking test",collaboratorId,agentId,`rank-lease-${index}`),
+				db.prepare("INSERT INTO submissions (id,task_id,agent_id,commit_sha,pull_request_url,summary,status,created_at,submitted_github_user_id,submitted_github_login) VALUES (?,?,?, ?,NULL,'Rank contribution','pending',unixepoch(),?,?)").bind(submissionId,taskId,agentId,sha,userId,`rank-person-${String(index).padStart(2,"0")}`),
+				db.prepare("UPDATE tasks SET status='accepted',lease_id=NULL,lease_until=NULL,assignee_agent_id=NULL WHERE id=?").bind(taskId),
+				db.prepare("UPDATE submissions SET status='accepted' WHERE id=?").bind(submissionId),
+				db.prepare("INSERT INTO integrations (id,task_id,submission_id,submitted_commit_sha,merge_commit_sha,integrated_by,integrated_at) VALUES (?,?,?,?,?,?,unixepoch())").bind(`rank-page-integration-${String(index).padStart(2,"0")}`,taskId,submissionId,sha,(index+900).toString(16).padStart(40,"0"),collaboratorId),
+			]);
+		}
+		const pageOne=await json<any>(await request("/api/ranking?measure=integrated&module=Ranking&period=all&limit=10","GET"));
+		const pageTwo=await json<any>(await request(`/api/ranking?measure=integrated&module=Ranking&period=all&limit=10&cursor=${encodeURIComponent(pageOne.nextCursor)}`,"GET"));
+		expect(pageOne.items).toHaveLength(10);expect(pageTwo.items).toHaveLength(2);expect(new Set([...pageOne.items,...pageTwo.items].map((person:any)=>person.login)).size).toBe(12);
+
+		await db.prepare("UPDATE tasks SET status='open',assignee_agent_id=NULL,lease_id=NULL,lease_until=NULL WHERE status='claimed'").run();
+		const reservationOwner=await credential("Reservation page owner","collaborator","lease-demo-agent"), activeTasks=[];
+		for(let index=0;index<11;index++)activeTasks.push(await addTask(`Currently reserved task ${index}`,50,undefined,"LeasePage"));
+		const expiredTask=await addTask("Expired reservation task",50,undefined,"LeasePage");
+		await db.batch([
+			...activeTasks.map((task:any,index:number)=>db.prepare("UPDATE tasks SET status='claimed',assignee_agent_id=?,lease_id=?,lease_until=unixepoch()+?,updated_at=unixepoch()-120 WHERE id=?").bind(reservationOwner.agentId,`test-active-lease-${index}`,3600+index,task.id)),
+			db.prepare("UPDATE tasks SET status='claimed',assignee_agent_id=?,lease_id='test-expired-lease',lease_until=unixepoch()-10,updated_at=unixepoch()-3600 WHERE id=?").bind(reservationOwner.agentId,expiredTask.id),
+		]);
+		const reservations=await json<any>(await request("/api/reservations?limit=10","GET"));
+		const nextReservations=await json<any>(await request(`/api/reservations?limit=10&cursor=${encodeURIComponent(reservations.nextCursor)}`,"GET"));
+		expect(reservations.items).toHaveLength(10);expect(nextReservations.items).toHaveLength(1);expect(reservations.nextCursor).toBeTruthy();
+		expect(new Set([...reservations.items,...nextReservations.items].map((item:any)=>item.taskId)).size).toBe(11);
+		expect([...reservations.items,...nextReservations.items].some((item:any)=>item.taskId===expiredTask.id)).toBe(false);
+	});
+
+	it("seeds the functional roadmap as planned and computes coverage separately from task progress", async () => {
+		const response = await worker.fetch(new Request("https://rustkore.test/api/roadmap"), runtimeEnv as any);
+		expect(response.status).toBe(200);
+		const data = await json<any>(response);
+		expect(data.milestones.map((item: any) => item.id)).toEqual(["foundation","prototype","alpha","beta","rc","stable"]);
+		expect(data.categories).toHaveLength(18);
+		expect(data.summary.total).toBe(278);
+		expect(data.summary.verified).toBe(0);
+		expect(data.summary.nextRelease).toMatchObject({ milestoneId: "prototype", verified: 0, total: 45 });
+		const states = await db.prepare("SELECT state,COUNT(*) AS n FROM roadmap_feature_status WHERE scenario='actual' GROUP BY state").all<any>();
+		expect(states.results).toEqual([{ state: "planned", n: 278 }]);
+	});
+
+	it("keeps optional requirements out of release readiness and restricts roadmap changes to maintainers", async () => {
+		const adminId = (await db.prepare("SELECT id FROM collaborators WHERE github_user_id=99999").first<any>()).id;
+		const adminSession = await createWebSession(adminId), contributor = await credential("Roadmap denied contributor", "collaborator", "roadmap-denied");
+		const contributorSession = await createWebSession(contributor.collaboratorId);
+		const deniedOperations = await Promise.all([
+			webRequest("/api/admin/roadmap/features/commerce.barter", "PATCH", contributorSession, { state: "verified", reason: "Attempt unauthorized verification" }),
+			webRequest("/api/admin/roadmap/features/commerce.barter/evidence", "POST", contributorSession, { url: "https://example.org/unauthorized-proof", label: "Unauthorized evidence", description: "Must not be accepted from a contributor." }),
+			webRequest("/api/admin/roadmap/features/commerce.barter/tasks", "POST", contributorSession, { taskId: "no-such-task" }),
+			webRequest("/api/admin/roadmap/import", "POST", contributorSession, roadmapCatalogFixture),
+			webRequest("/api/admin/roadmap/evidence/no-such-evidence", "PATCH", contributorSession, { valid: false, reason: "Attempt unauthorized invalidation" }),
+		]);
+		expect(deniedOperations.map((response) => response.status)).toEqual([403, 403, 403, 403, 403]);
+		const evidence = await webRequest("/api/admin/roadmap/features/commerce.barter/evidence", "POST", adminSession, { url: "https://example.org/optional-validation", label: "Optional test evidence", description: "Validated in an isolated automated test." });
+		expect(evidence.status).toBe(201);
+		const verified = await webRequest("/api/admin/roadmap/features/commerce.barter", "PATCH", adminSession, { state: "verified", reason: "Optional requirement verified using test evidence." });
+		expect(verified.status).toBe(200);
+		const roadmapResponse = await worker.fetch(new Request("https://rustkore.test/api/roadmap"), runtimeEnv as any), roadmap = await json<any>(roadmapResponse);
+		expect(roadmap.summary.verified).toBe(1);
+		expect(roadmap.summary.nextRelease).toMatchObject({ milestoneId: "prototype", verified: 0, total: 45 });
+	});
+
+	it("invalidates a verified feature when its last public evidence is invalidated and records history", async () => {
+		const adminId = (await db.prepare("SELECT id FROM collaborators WHERE github_user_id=99999").first<any>()).id, session = await createWebSession(adminId);
+		const proof = await webRequest("/api/admin/roadmap/features/networking.authentication/evidence", "POST", session, { url: "https://example.org/networking-proof", label: "Protocol test", description: "Local deterministic integration validation." });
+		const proofBody = await json<any>(proof);
+		const setTesting = await webRequest("/api/admin/roadmap/features/networking.authentication", "PATCH", session, { state: "testing", reason: "Automated proof is ready for maintainer verification." });
+		expect(setTesting.status).toBe(200);
+		const verify = await webRequest("/api/admin/roadmap/features/networking.authentication", "PATCH", session, { state: "verified", reason: "Protocol test confirms the acceptance criteria." });
+		expect(verify.status).toBe(200);
+		const afterVerify = await json<any>(await worker.fetch(new Request("https://rustkore.test/api/roadmap"), runtimeEnv as any));
+		expect(afterVerify.summary.verified).toBe(2);
+		expect(afterVerify.summary.nextRelease).toMatchObject({ milestoneId: "prototype", verified: 1, total: 45 });
+		const invalidated = await webRequest(`/api/admin/roadmap/evidence/${proofBody.evidenceId}`, "PATCH", session, { valid: false, reason: "Evidence was found to be incomplete." });
+		expect(invalidated.status).toBe(200);
+		const feature = await db.prepare("SELECT state,verified_by,verified_at FROM roadmap_feature_status WHERE feature_id='networking.authentication' AND scenario='actual'").first<any>();
+		expect(feature).toMatchObject({ state: "testing", verified_by: null, verified_at: null });
+		const afterInvalidation = await json<any>(await worker.fetch(new Request("https://rustkore.test/api/roadmap"), runtimeEnv as any));
+		expect(afterInvalidation.summary.verified).toBe(1);
+		expect(afterInvalidation.summary.nextRelease).toMatchObject({ milestoneId: "prototype", verified: 0, total: 45 });
+		const evidenceRow = await db.prepare("SELECT created_by,is_valid FROM roadmap_feature_evidence WHERE id=?").bind(proofBody.evidenceId).first<any>();
+		expect(evidenceRow).toMatchObject({ created_by: adminId, is_valid: 0 });
+		const history = await webRequest("/api/admin/roadmap/history?limit=25", "GET", session), body = await json<any>(history);
+		expect(body.items.some((item: any) => item.action === "feature.invalidated" && item.actor === "test-admin")).toBe(true);
+		expect(body.items.some((item: any) => item.action === "feature.evidence_added" && item.actor === "test-admin")).toBe(true);
+	});
+
+	it("keeps demonstration roadmap state isolated and rejects demo mode on public hosts", async () => {
+		const local = await worker.fetch(new Request("http://localhost/api/roadmap?scenario=demo"), runtimeEnv as any);
+		expect(local.status).toBe(200); expect((await json<any>(local)).scenario).toBe("demo");
+		const publicAttempt = await worker.fetch(new Request("https://rustkore.test/api/roadmap?scenario=demo"), runtimeEnv as any);
+		expect(publicAttempt.status).toBe(403);
+		const actual = await worker.fetch(new Request("https://rustkore.test/api/roadmap"), runtimeEnv as any);
+		expect((await json<any>(actual)).summary.verified).toBe(1);
+	});
+
+	it("filters functional requirements and paginates only the selected catalog slice", async () => {
+		const firstResponse = await worker.fetch(new Request("https://rustkore.test/api/roadmap/features?category=networking&milestone=prototype&state=planned&limit=2"), runtimeEnv as any);
+		expect(firstResponse.status).toBe(200);
+		const first = await json<any>(firstResponse);
+		expect(first.features).toHaveLength(2);
+		expect(first.features.every((feature: any) => feature.categoryId === "networking" && feature.milestoneId === "prototype" && feature.state === "planned")).toBe(true);
+		expect(first.nextCursor).toBeTruthy();
+		const secondResponse = await worker.fetch(new Request(`https://rustkore.test/api/roadmap/features?category=networking&milestone=prototype&state=planned&limit=2&cursor=${encodeURIComponent(first.nextCursor)}`), runtimeEnv as any);
+		const second = await json<any>(secondResponse);
+		expect(second.features.every((feature: any) => feature.categoryId === "networking" && feature.milestoneId === "prototype" && feature.state === "planned")).toBe(true);
+		expect(second.features.some((feature: any) => first.features.some((prior: any) => prior.id === feature.id))).toBe(false);
+		const invalidState = await worker.fetch(new Request("https://rustkore.test/api/roadmap/features?state=unknown"), runtimeEnv as any);
+		expect(invalidState.status).toBe(400);
+	});
+
+	it("imports roadmap catalog idempotently while preserving status and task associations", async () => {
+		const adminId = (await db.prepare("SELECT id FROM collaborators WHERE github_user_id=99999").first<any>()).id, session = await createWebSession(adminId);
+		const catalog = structuredClone(roadmapCatalogFixture);
+		const first = await webRequest("/api/admin/roadmap/import", "POST", session, catalog);
+		expect(first.status, await first.clone().text()).toBe(200); expect((await json<any>(first)).imported).toBe(true);
+		const second = await webRequest("/api/admin/roadmap/import", "POST", session, catalog);
+		expect((await json<any>(second)).unchanged).toBe(true);
+		await db.prepare("UPDATE roadmap_feature_status SET state='developing',change_reason='Preserve across catalog refresh' WHERE feature_id='testing.roadmap-import' AND scenario='actual'").run();
+		const task = await addTask("Roadmap import association fixture");
+		const linked = await webRequest("/api/admin/roadmap/features/testing.roadmap-import/tasks", "POST", session, { taskId: task.id });
+		expect(linked.status).toBe(201);
+		const unlinked = await webRequest(`/api/admin/roadmap/features/testing.roadmap-import/tasks/${encodeURIComponent(task.id)}`, "DELETE", session);
+		expect((await json<any>(unlinked)).linked).toBe(false);
+		const relinked = await webRequest("/api/admin/roadmap/features/testing.roadmap-import/tasks", "POST", session, { taskId: task.id });
+		expect(relinked.status).toBe(201);
+		catalog.catalogVersion = "1.0.1"; catalog.features[0].description = "Updated catalog description while preserving implementation tracking.";
+		const updated = await webRequest("/api/admin/roadmap/import", "POST", session, catalog);
+		expect(updated.status).toBe(200);
+		const proof = await webRequest("/api/admin/roadmap/features/testing.roadmap-import/evidence", "POST", session, { url: "https://example.org/import-preserved-proof", label: "Import preservation", description: "Evidence remains after a metadata-only catalog refresh." });
+		const proofBody = await json<any>(proof);
+		const verified = await webRequest("/api/admin/roadmap/features/testing.roadmap-import", "PATCH", session, { state: "testing", reason: "Prepare import fixture state for verification." });
+		expect(verified.status).toBe(200);
+		const verification = await webRequest("/api/admin/roadmap/features/testing.roadmap-import", "PATCH", session, { state: "verified", reason: "Local fixture evidence confirms the import preservation behavior." });
+		expect(verification.status).toBe(200);
+		catalog.catalogVersion = "1.0.2";
+		catalog.features[0].upstreamReferences = ["https://github.com/OpenKore/openkore/blob/396c4c64f39a9dbc0b3f522754e4da5dfc3e1096/src/Network/Receive.pm"];
+		const refreshed = await webRequest("/api/admin/roadmap/import", "POST", session, catalog);
+		expect(refreshed.status).toBe(200);
+		const feature = await db.prepare(`SELECT f.description,s.state,s.verified_by,
+			(SELECT COUNT(*) FROM roadmap_feature_tasks ft WHERE ft.feature_id=f.id AND ft.active=1 AND ft.scenario='actual') AS links,
+			(SELECT COUNT(*) FROM roadmap_feature_evidence e WHERE e.feature_id=f.id AND e.is_valid=1 AND e.scenario='actual') AS evidence
+			FROM roadmap_features f JOIN roadmap_feature_status s ON s.feature_id=f.id AND s.scenario='actual' WHERE f.id='testing.roadmap-import'`).first<any>();
+		expect(feature).toMatchObject({ description: catalog.features[0].description, state: "verified", verified_by: adminId, links: 1, evidence: 1 });
+		const link = await db.prepare("SELECT linked_by FROM roadmap_feature_tasks WHERE feature_id='testing.roadmap-import' AND active=1 AND scenario='actual'").first<any>();
+		expect(link.linked_by).toBe(adminId);
+		const evidenceRow = await db.prepare("SELECT created_by,is_valid FROM roadmap_feature_evidence WHERE id=?").bind(proofBody.evidenceId).first<any>();
+		expect(evidenceRow).toMatchObject({ created_by: adminId, is_valid: 1 });
+		const history = await webRequest("/api/admin/roadmap/history?limit=25", "GET", session), historyBody = await json<any>(history);
+		expect(historyBody.items.some((item: any) => item.featureId === "testing.roadmap-import" && item.action === "feature.task_linked" && item.actor === "test-admin")).toBe(true);
+		expect(historyBody.items.some((item: any) => item.featureId === "testing.roadmap-import" && item.action === "feature.verified" && item.actor === "test-admin")).toBe(true);
+		expect(proofBody.evidenceId).toBeTruthy();
+	});
+
+
 });
