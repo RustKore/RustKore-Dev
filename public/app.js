@@ -12,7 +12,7 @@ const count=value=>Number(value||0).toLocaleString("pt-BR");
 function renderDashboard(data){
  dashboard=data;const s=data.summary||{},total=Number(s.total||0),integrated=Number(s.integrated||0),pct=total?Math.round(integrated/total*100):0;
  $("#progress-percent").textContent=pct+"%";$("#progress-caption").textContent=count(integrated)+" de "+count(total)+" tarefas";
- $("#metric-total").textContent=count(total);$("#metric-available").textContent=count(s.available);$("#metric-reserved").textContent=count(s.reserved);$("#metric-review").textContent=count(s.inReview);$("#metric-integrated").textContent=count(integrated);
+ $("#metric-total").textContent=count(total);$("#metric-available").textContent=count(s.available);$("#metric-blocked").textContent=count(s.blocked);$("#metric-reserved").textContent=count(s.reserved);$("#metric-review").textContent=count(s.inReview);$("#metric-approved").textContent=count(s.approved);$("#metric-integrated").textContent=count(integrated);
  const modules=$("#modules");modules.replaceChildren();const select=$("#module-filter"),selected=select.value;select.replaceChildren(new Option("Todos os módulos",""));
  for(const item of data.modules||[]){const progress=Number(item.total)?Math.round(Number(item.integrated)/Number(item.total)*100):0,card=el("article","module-card"),head=el("div","module-head");
  head.append(el("span","",item.module),el("span","",progress+"%"));const meta=el("div","module-meta");meta.append(el("span","",count(item.integrated)+" integradas"),el("span","",count(item.total)+" tarefas"));
@@ -31,7 +31,8 @@ function renderDashboard(data){
 function renderTasks(tasks){const module=$("#module-filter").value,visible=tasks.filter(t=>!module||t.module===module),rows=$("#task-rows");rows.replaceChildren();
  if(!visible.length){const tr=el("tr"),td=el("td","loading","Nenhuma tarefa corresponde a este filtro.");td.colSpan=5;tr.append(td);rows.append(tr);}
  visible.forEach(task=>{const tr=document.createElement("tr"),titleCell=document.createElement("td"),title=el("span","task-title");title.append(el("strong","",task.title),el("span","",task.description||""));titleCell.append(title);
- const moduleCell=el("td","module-tag",task.module),stateCell=document.createElement("td"),key=task.status==="open"?"open":task.status,state=el("span","status status-"+key,({open:"Disponível",claimed:"Reservada",submitted:"Em revisão",accepted:"Aprovada",integrated:"Integrada"})[key]||key);stateCell.append(state);
+ const moduleCell=el("td","module-tag",task.module),stateCell=document.createElement("td"),key=task.state||task.status,state=el("span","status status-"+key,({available:"Disponível",blocked:"Bloqueada",reserved:"Reservada",in_review:"Em revisão",approved:"Aprovada",integrated:"Integrada"})[key]||key);
+ if(key==="blocked"){state.title="Aguardando a aprovação de tarefas dependentes";state.setAttribute("aria-label","Bloqueada: aguardando tarefas dependentes");}stateCell.append(state);
  const assignee=el("td","assignee",task.assignee?"@"+task.assignee+" · "+(task.agentName||"agente"):"—"),priority=el("td","priority","P"+String(task.priority).padStart(2,"0"));tr.append(titleCell,moduleCell,stateCell,assignee,priority);rows.append(tr);});
  $("#task-count").textContent="Exibindo "+visible.length+" de "+((dashboard&&dashboard.tasks)||[]).length+" tarefas públicas";
 }

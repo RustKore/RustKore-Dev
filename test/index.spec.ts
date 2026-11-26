@@ -369,6 +369,50 @@ describe("RustKore coordinator and stateless MCP", () => {
 		expect(activity.output.activities.some((item: any) => item.action === "task.created")).toBe(true);
 	});
 
+	it("shows claim eligibility and progress states consistently on the public dashboard", async () => {
+		await db.prepare("UPDATE tasks SET status='accepted',assignee_agent_id=NULL,lease_id=NULL,lease_until=NULL WHERE status IN ('open','claimed','submitted')").run();
+		const baselineTask = await addTask("dashboard eligibility baseline", 40);
+		const before = await json<any>(await request("/api/dashboard", "GET"));
+		const parent = await addTask("dashboard dependency parent", 90), blocked = await addTask("dashboard dependency blocked", 100, [parent.id]);
+		const available = await addTask("dashboard independently available", 80), inReview = await addTask("dashboard in review", 70), approved = await addTask("dashboard approved", 60);
+		await db.prepare("UPDATE tasks SET status='submitted' WHERE id=?").bind(inReview.id).run();
+		await db.prepare("UPDATE tasks SET status='accepted' WHERE id=?").bind(approved.id).run();
+
+		const worker = await credential("Dashboard eligibility worker", "collaborator", "dashboard-worker");
+		const claim = await tool(worker.token, "claim_task");
+		expect(claim.output.task.id).toBe(parent.id);
+		const dashboard = await json<any>(await request("/api/dashboard", "GET"));
+		const taskById = new Map(dashboard.tasks.map((task: any) => [task.id, task]));
+		expect((taskById.get(parent.id) as any).state).toBe("reserved");
+		expect((taskById.get(blocked.id) as any).state).toBe("blocked");
+		expect((taskById.get(available.id) as any).state).toBe("available");
+		expect((taskById.get(inReview.id) as any).state).toBe("in_review");
+		expect((taskById.get(approved.id) as any).state).toBe("approved");
+		expect(dashboard.tasks.some((task: any) => task.state === "integrated")).toBe(true);
+		expect(dashboard.summary.available).toBe(Number(before.summary.available) + 1);
+		expect(dashboard.summary.blocked).toBe(Number(before.summary.blocked) + 1);
+		expect(dashboard.summary.reserved).toBe(Number(before.summary.reserved) + 1);
+		expect(dashboard.summary.inReview).toBe(Number(before.summary.inReview) + 1);
+		expect(dashboard.summary.approved).toBe(Number(before.summary.approved) + 1);
+		expect(dashboard.summary.total).toBe(Number(before.summary.total) + 5);
+		expect(Number(dashboard.summary.integrated)).toBe(Number(before.summary.integrated));
+		expect((taskById.get(baselineTask.id) as any).state).toBe("available");
+
+		const otherWorker = await credential("Dashboard blocked-task guard", "collaborator", "dashboard-guard");
+		const nextClaim = await tool(otherWorker.token, "claim_task");
+		expect(nextClaim.output.task.id).toBe(available.id);
+		const finalDashboard = await json<any>(await request("/api/dashboard", "GET"));
+		const list = await tool(worker.token, "list_tasks", { status: "open", limit: 100 });
+		expect(list.output.tasks.find((task: any) => task.id === blocked.id).state).toBe("blocked");
+		const progress = await tool(adminToken, "get_progress");
+		expect(progress.output.tasks.find((row: any) => row.state === "blocked").count).toBe(finalDashboard.summary.blocked);
+		expect(progress.output.tasks.find((row: any) => row.state === "available").count).toBe(finalDashboard.summary.available);
+		expect(progress.output.tasks.find((row: any) => row.state === "reserved").count).toBe(finalDashboard.summary.reserved);
+		expect(progress.output.tasks.find((row: any) => row.state === "in_review").count).toBe(finalDashboard.summary.inReview);
+		expect(progress.output.tasks.find((row: any) => row.state === "approved").count).toBe(finalDashboard.summary.approved);
+		expect(progress.output.tasks.find((row: any) => row.state === "integrated").count).toBe(finalDashboard.summary.integrated);
+	});
+
 	it.each([10, 50, 100, 500])("handles a burst of %i independent agents without double claims", async (count) => {
 		await db.prepare("UPDATE tasks SET status='accepted',assignee_agent_id=NULL,lease_id=NULL,lease_until=NULL WHERE status IN ('open','claimed')").run();
 		const collaborators: any[] = [];

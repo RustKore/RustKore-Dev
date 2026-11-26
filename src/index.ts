@@ -20,6 +20,21 @@ const text = (v: unknown, name: string, max = 10_000): string => {
 };
 const optText = (v: unknown, max = 2000): string | null => v == null || v === "" ? null : text(v, "value", max);
 const authHeader = (r: Request) => r.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1] ?? null;
+const taskCanBeClaimedSql = (alias: string) => `(${alias}.status='open' OR (${alias}.status='claimed' AND ${alias}.lease_until<=unixepoch()))`;
+const taskDependenciesSatisfiedSql = (alias: string) => `NOT EXISTS (
+	SELECT 1 FROM task_dependencies d JOIN tasks parent ON parent.id=d.depends_on_id
+	WHERE d.task_id=${alias}.id AND parent.status!='accepted'
+)`;
+const taskClaimEligibleSql = (alias: string) => `(${taskCanBeClaimedSql(alias)} AND ${taskDependenciesSatisfiedSql(alias)})`;
+const taskDashboardStateSql = (alias: string) => `CASE
+	WHEN EXISTS (SELECT 1 FROM integrations i WHERE i.task_id=${alias}.id) THEN 'integrated'
+	WHEN ${alias}.status='accepted' THEN 'approved'
+	WHEN ${alias}.status='submitted' THEN 'in_review'
+	WHEN ${alias}.status='claimed' AND ${alias}.lease_until>unixepoch() THEN 'reserved'
+	WHEN ${taskClaimEligibleSql(alias)} THEN 'available'
+	ELSE 'blocked'
+END`;
+const invalidateDashboard = () => { cachedDashboard = null; };
 
 async function sha256(value: string) {
 	const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -223,11 +238,13 @@ async function createTask(db: D1Database, input: any, actor: Identity | string) 
 	stmts.push(db.prepare(`INSERT INTO activity (id,task_id,actor_id,action,details_json,created_at)
 		SELECT ?,id,?,'task.created',?,? FROM tasks WHERE id=?`).bind(id(), typeof actor === "string" ? actor : actor.collaboratorId, JSON.stringify({ title: text(input.title, "title", 200), priority, dependencies }), now(), taskId));
 	await db.batch(stmts);
+	invalidateDashboard();
 	return { id: taskId, title: text(input.title, "title", 200), module, description: text(input.description, "description", 4000), acceptance_criteria: text(input.acceptanceCriteria, "acceptanceCriteria", 4000), priority, status: "open", dependencies, submissions: [] };
 }
 
 async function getTask(db: D1Database, taskId: string) {
 	const task = await db.prepare(`SELECT t.*, CASE WHEN EXISTS(SELECT 1 FROM integrations i WHERE i.task_id=t.id) THEN 'integrated' WHEN t.status='claimed' AND t.lease_until<=? THEN 'open' ELSE t.status END AS effective_status,
+		${taskDashboardStateSql("t")} AS state,
 		c.name AS assignee_name FROM tasks t LEFT JOIN agents a ON a.id=t.assignee_agent_id LEFT JOIN collaborators c ON c.id=a.collaborator_id WHERE t.id=?`).bind(now(), taskId).first<any>();
 	if (!task) throw new Error("Task not found");
 	const dependencies = await db.prepare("SELECT depends_on_id FROM task_dependencies WHERE task_id=?").bind(taskId).all<{ depends_on_id: string }>();
@@ -261,6 +278,7 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 			}
 			const rows = await db.prepare(`SELECT t.id,t.title,t.module,t.description,t.acceptance_criteria AS acceptanceCriteria,t.priority,
 				CASE WHEN EXISTS(SELECT 1 FROM integrations i WHERE i.task_id=t.id) THEN 'integrated' WHEN t.status='claimed' AND t.lease_until<=? THEN 'open' ELSE t.status END AS status,
+				${taskDashboardStateSql("t")} AS state,
 				CASE WHEN t.status='claimed' AND t.lease_until<=? THEN NULL ELSE t.assignee_agent_id END AS assigneeAgentId,
 				CASE WHEN t.status='claimed' AND t.lease_until<=? THEN NULL ELSE t.lease_until END AS leaseUntil,t.created_at AS createdAt
 				FROM tasks t WHERE (? IS NULL OR (CASE WHEN EXISTS(SELECT 1 FROM integrations i WHERE i.task_id=t.id) THEN 'integrated' WHEN t.status='claimed' AND t.lease_until<=? THEN 'open' ELSE t.status END)=?)
@@ -275,8 +293,7 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 			const leaseId = id(), heartbeatIntervalSeconds = setting(env.HEARTBEAT_INTERVAL_SECONDS, DEFAULT_HEARTBEAT_SECONDS, 30, 600), leaseDurationSeconds = setting(env.LEASE_DURATION_SECONDS, Math.max(DEFAULT_LEASE_SECONDS, heartbeatIntervalSeconds + 30), heartbeatIntervalSeconds + 30, 3600);
 			const claimed = await db.batch([
 				db.prepare(`UPDATE tasks SET status='claimed', assignee_agent_id=?, lease_id=?, lease_until=unixepoch()+?, updated_at=unixepoch()
-				WHERE id=(SELECT t.id FROM tasks t WHERE (t.status='open' OR (t.status='claimed' AND t.lease_until<=unixepoch()))
-				AND NOT EXISTS (SELECT 1 FROM task_dependencies d JOIN tasks parent ON parent.id=d.depends_on_id WHERE d.task_id=t.id AND parent.status!='accepted')
+				WHERE id=(SELECT t.id FROM tasks t WHERE ${taskClaimEligibleSql("t")}
 				ORDER BY t.priority DESC,t.created_at ASC LIMIT 1)
 				AND (status='open' OR (status='claimed' AND lease_until<=unixepoch())) RETURNING id,title,description,acceptance_criteria AS acceptanceCriteria,priority,lease_id AS leaseId,lease_until AS leaseUntil`)
 					.bind(identity.agentId, leaseId, leaseDurationSeconds),
@@ -289,6 +306,7 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 				const base = Math.min(60, 2 ** attempt), jitter = Math.floor(Math.random() * Math.max(1, Math.ceil(base * 0.25)));
 				return { task: null, message: "No eligible task is currently available", retryAfterSeconds: Math.min(60, base + jitter), nextBackoffAttempt: Math.min(10, attempt + 1) };
 			}
+			invalidateDashboard();
 			return { task: { ...row, heartbeatIntervalSeconds } };
 		}
 		case "get_task": requireRole(identity, "admin", "collaborator", "reviewer"); return getTask(db, text(args.taskId, "taskId", 80));
@@ -299,7 +317,7 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 			const duration = setting(env.LEASE_DURATION_SECONDS, Math.max(DEFAULT_LEASE_SECONDS, heartbeatIntervalSeconds + 30), heartbeatIntervalSeconds + 30, 3600);
 			const row = await db.prepare("UPDATE tasks SET lease_until=unixepoch()+?,updated_at=unixepoch() WHERE id=? AND status='claimed' AND assignee_agent_id=? AND lease_id=? AND lease_until>unixepoch() RETURNING id,lease_until AS leaseUntil")
 				.bind(duration, taskId, identity.agentId, leaseId).first();
-			if (row) return row;
+			if (row) { invalidateDashboard(); return row; }
 			const current = await db.prepare("SELECT id,lease_until AS leaseUntil FROM tasks WHERE id=? AND status='claimed' AND assignee_agent_id=? AND lease_id=? AND lease_until>unixepoch() AND lease_until>=unixepoch()+?")
 				.bind(taskId, identity.agentId, leaseId, duration).first();
 			if (!current) throw new Error("Lease is missing, expired, or belongs to another agent");
@@ -319,6 +337,7 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 			]);
 			const row = released[0].results?.[0];
 			if (!row) throw new Error("Lease is missing, expired, or belongs to another agent");
+			invalidateDashboard();
 			return { released: true };
 		}
 		case "submit_task": {
@@ -336,6 +355,7 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 				SELECT ?,t.id,?,?,?,?,'pending',unixepoch(),?,? FROM tasks t WHERE t.id=? AND t.status='claimed' AND t.assignee_agent_id=? AND t.lease_id=? AND t.lease_until>unixepoch() RETURNING id`)
 				.bind(submissionId, identity.agentId, commitSha.toLowerCase(), githubProof.pullRequestUrl, text(args.summary, "summary", 2000), identity.githubUserId, identity.githubLogin, taskId, identity.agentId, leaseId).first();
 			if (!submitted) throw new Error("A current, unexpired lease is required to submit");
+			invalidateDashboard();
 			return { submissionId, status: "pending" };
 		}
 		case "review_task": {
@@ -356,14 +376,15 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 				db.prepare(`INSERT INTO activity (id,task_id,actor_id,action,details_json,created_at)
 					SELECT ?,s.task_id,?,?,?,? FROM reviews r JOIN submissions s ON s.id=r.submission_id WHERE r.id=?`).bind(id(), identity.collaboratorId, `submission.${decision}`, JSON.stringify({ submissionId, comment: args.comment ?? null }), ts, reviewId),
 			]);
+			invalidateDashboard();
 			return { reviewId, decision };
 		}
 		case "get_progress": {
 			requireRole(identity, "admin", "collaborator", "reviewer");
-			const rows = await db.prepare(`SELECT CASE WHEN EXISTS(SELECT 1 FROM integrations i WHERE i.task_id=t.id) THEN 'integrated'
-				WHEN t.status='claimed' AND t.lease_until<=? THEN 'open' ELSE t.status END AS status,COUNT(*) AS count
-				FROM tasks t GROUP BY CASE WHEN EXISTS(SELECT 1 FROM integrations i WHERE i.task_id=t.id) THEN 'integrated'
-				WHEN t.status='claimed' AND t.lease_until<=? THEN 'open' ELSE t.status END`).bind(now(), now()).all();
+			const state = taskDashboardStateSql("t");
+			const rows = await db.prepare(`SELECT CASE state WHEN 'available' THEN 'open' WHEN 'blocked' THEN 'open'
+				WHEN 'reserved' THEN 'claimed' WHEN 'in_review' THEN 'submitted' WHEN 'approved' THEN 'accepted' ELSE state END AS status,
+				state,COUNT(*) AS count FROM (SELECT ${state} AS state FROM tasks t) GROUP BY state`).all();
 			const activity = await db.prepare("SELECT action,COUNT(*) AS count FROM (SELECT action FROM activity ORDER BY created_at DESC,id DESC LIMIT 500) GROUP BY action ORDER BY count DESC LIMIT 20").all();
 			return { tasks: rows.results, recentActivitySummary: activity.results };
 		}
@@ -467,16 +488,18 @@ async function mcp(request: Request, env: Env) {
 
 async function publicDashboard(db: D1Database) {
 	if (cachedDashboard && cachedDashboard.expires > Date.now()) return cachedDashboard.content;
+	const state = taskDashboardStateSql("t");
 	const [summary, modules, taskRows, contributors, agents, history] = await Promise.all([
 		db.prepare(`SELECT COUNT(*) AS total,
-			SUM(CASE WHEN EXISTS(SELECT 1 FROM integrations i WHERE i.task_id=t.id) THEN 1 ELSE 0 END) AS integrated,
-			SUM(CASE WHEN t.status='submitted' THEN 1 ELSE 0 END) AS inReview,
-			SUM(CASE WHEN t.status='claimed' AND t.lease_until>unixepoch() THEN 1 ELSE 0 END) AS reserved,
-			SUM(CASE WHEN t.status='open' OR (t.status='claimed' AND t.lease_until<=unixepoch()) THEN 1 ELSE 0 END) AS available FROM tasks t`).first<any>(),
-		db.prepare(`SELECT t.module,COUNT(*) AS total,SUM(CASE WHEN i.id IS NULL THEN 0 ELSE 1 END) AS integrated
-			FROM tasks t LEFT JOIN integrations i ON i.task_id=t.id GROUP BY t.module ORDER BY integrated DESC,total DESC,t.module ASC LIMIT 30`).all<any>(),
+			SUM(state='integrated') AS integrated,SUM(state='available') AS available,SUM(state='blocked') AS blocked,
+			SUM(state='reserved') AS reserved,SUM(state='in_review') AS inReview,SUM(state='approved') AS approved
+			FROM (SELECT ${state} AS state FROM tasks t)`).first<any>(),
+		db.prepare(`SELECT module,COUNT(*) AS total,SUM(state='integrated') AS integrated,SUM(state='available') AS available,
+			SUM(state='blocked') AS blocked,SUM(state='reserved') AS reserved,SUM(state='in_review') AS inReview,SUM(state='approved') AS approved
+			FROM (SELECT t.module,${state} AS state FROM tasks t) GROUP BY module ORDER BY integrated DESC,total DESC,module ASC LIMIT 30`).all<any>(),
 		db.prepare(`SELECT t.id,t.title,t.module,t.description,t.acceptance_criteria AS acceptanceCriteria,t.priority,t.created_at AS createdAt,
 			CASE WHEN i.id IS NOT NULL THEN 'integrated' WHEN t.status='claimed' AND t.lease_until<=unixepoch() THEN 'open' ELSE t.status END AS status,
+			${state} AS state,
 			CASE WHEN t.status='claimed' AND t.lease_until>unixepoch() THEN a.name END AS agentName,
 			CASE WHEN t.status='claimed' AND t.lease_until>unixepoch() THEN c.github_login END AS assignee
 			FROM tasks t LEFT JOIN integrations i ON i.task_id=t.id LEFT JOIN agents a ON a.id=t.assignee_agent_id LEFT JOIN collaborators c ON c.id=a.collaborator_id
@@ -497,17 +520,17 @@ async function publicDashboard(db: D1Database) {
 			JOIN agents a ON a.id=s.agent_id JOIN collaborators c ON c.id=a.collaborator_id LEFT JOIN integrations i ON i.submission_id=s.id
 			ORDER BY s.created_at DESC,s.id DESC LIMIT 20`).all<any>(),
 	]);
-	const value = { summary: summary ?? { total: 0, integrated: 0, inReview: 0, reserved: 0, available: 0 }, modules: modules.results, tasks: taskRows.results,
+	const value = { summary: summary ?? { total: 0, integrated: 0, available: 0, blocked: 0, reserved: 0, inReview: 0, approved: 0 }, modules: modules.results, tasks: taskRows.results,
 		contributors: contributors.results, activeAgents: agents.results, recentContributions: history.results,
 		recentIntegrations: history.results.filter((row: any) => row.status === "integrated") };
-	cachedDashboard = { content: value, expires: Date.now() + 15_000 };
+	cachedDashboard = { content: value, expires: Date.now() + 5_000 };
 	return value;
 }
 
 async function dashboardApi(request: Request, env: Env) {
 	const db = env.rustkore_db, url = new URL(request.url), path = url.pathname;
 	if (await anonymousRateLimited(request, env, "web-api")) return json({ error: "Rate limit exceeded" }, 429, { "retry-after": "60" });
-	if (path === "/api/dashboard" && request.method === "GET") return json(await publicDashboard(db), 200, { "cache-control": "public, max-age=15, stale-while-revalidate=30" });
+	if (path === "/api/dashboard" && request.method === "GET") return json(await publicDashboard(db), 200, { "cache-control": "public, max-age=5, stale-while-revalidate=5" });
 	if (path === "/api/me" && request.method === "GET") {
 		const identity = await getWebIdentity(request, db, env);
 		if (!identity) return json({ authenticated: false });
@@ -616,6 +639,7 @@ async function dashboardApi(request: Request, env: Env) {
 		if (!result) return json({ error: "Task not found or is no longer open" }, 409);
 		await db.prepare(`INSERT INTO activity (id,task_id,actor_id,action,details_json,created_at) VALUES (?,?,?,'task.updated',?,?)`)
 			.bind(id(), taskId, identity.collaboratorId, JSON.stringify({ fields: Object.keys(fields).filter((key) => body[key] !== undefined).concat(body.priority !== undefined ? ["priority"] : []) }), ts).run();
+		invalidateDashboard();
 		return json({ updated: true, taskId });
 	}
 	const integrateMatch = path.match(/^\/api\/admin\/submissions\/([^/]+)\/integrate$/);
@@ -634,6 +658,7 @@ async function dashboardApi(request: Request, env: Env) {
 				SELECT ?,s.task_id,s.id,s.commit_sha,?,?,unixepoch() FROM submissions s WHERE s.id=? AND s.status='accepted' AND s.commit_sha=? AND s.pull_request_url=? RETURNING id`)
 				.bind(id(), pull.merge_commit_sha.toLowerCase(), identity.collaboratorId, submissionId, submission.commitSha, submission.pullRequestUrl).first();
 			if (!integration) return json({ error: "Submission changed while integration was being recorded" }, 409);
+			invalidateDashboard();
 			return json({ integrated: true, taskId: submission.taskId, mergeCommitSha: pull.merge_commit_sha });
 		} catch (error) { return json({ error: error instanceof Error ? error.message : "GitHub could not verify the merge" }, 502); }
 	}
