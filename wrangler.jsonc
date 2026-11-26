@@ -7,15 +7,35 @@
 	"name": "rustkore",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-11-23",
+	"vars": {
+		"GITHUB_OAUTH_CLIENT_ID": "Ov23ligWeQeA1W2oSAsI",
+		"GITHUB_OAUTH_CALLBACK_URL": "https://rustkore.boscv.workers.dev/auth/callback",
+		"RUSTKORE_ADMIN_GITHUB_IDS": "234458543",
+		"GITHUB_REPOSITORY": "boscv/RustKore"
+	},
 	"observability": {
 		"enabled": true
 	},
+	"ratelimits": [
+		{
+			"name": "API_RATE_LIMITER",
+			"namespace_id": "938501",
+			"simple": { "limit": 120, "period": 60 }
+		}
+	],
 	"upload_source_maps": true,
+	"assets": {
+		"directory": "./public",
+		"binding": "ASSETS",
+		"not_found_handling": "single-page-application",
+		"run_worker_first": ["/api/*", "/auth/*", "/mcp", "/health", "/setup", "/admin/*"]
+	},
 	"d1_databases": [
 		{
 			"binding": "rustkore_db",
 			"database_name": "rustkore-db",
-			"database_id": "0e4a8136-e767-4c7e-9a85-b8df8ee5afc1"
+			"database_id": "0e4a8136-e767-4c7e-9a85-b8df8ee5afc1",
+			"migrations_dir": "migrations"
 		}
 	]
 	/**
@@ -36,11 +56,6 @@
 	 * https://developers.cloudflare.com/workers/configuration/secrets/
 	 */
 	// "vars": {  "MY_VARIABLE": "production_value" }
-	/**
-	 * Static Assets
-	 * https://developers.cloudflare.com/workers/static-assets/binding/
-	 */
-	// "assets": {  "directory": "./public/",  "binding": "ASSETS" }
 	/**
 	 * Service Bindings (communicate between multiple Workers)
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings

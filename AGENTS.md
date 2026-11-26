@@ -40,6 +40,14 @@ If the routes above don't cover what you need, fetch the full OpenAPI schema (la
 
 Use the Local Explorer to debug issues by inspecting storage state (KV keys, D1 rows, R2 objects, DO storage), viewing Worker bindings, and querying request traces and logs captured during the dev session.
 
+## RustKore project constraints
+
+- The Worker is the task coordinator and stateless MCP Streamable HTTP endpoint. Keep authoritative task and lease transitions in D1.
+- Run `npx wrangler d1 migrations apply rustkore-db --local` and `npm test` for local validation. Never use `--remote` or deploy as part of validation.
+- Keep credentials in Workers secrets or local `.dev.vars`; never commit credentials, source patches, or agent logs to D1.
+- Preserve conditional/batched D1 writes around claim, submission, and review so quota or database errors cannot leave partial task transitions.
+- Keep queries indexed and paginated. Respect Free limits even when testing Paid compatibility; load tests must use local D1.
+
 ## Node.js Compatibility
 
 https://developers.cloudflare.com/workers/runtime-apis/nodejs/
