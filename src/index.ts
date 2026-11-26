@@ -1,5 +1,5 @@
 type Role = "admin" | "collaborator" | "reviewer";
-type Env = { rustkore_db: D1Database; ASSETS?: { fetch(request: Request): Promise<Response> }; API_RATE_LIMITER?: { limit(input: { key: string }): Promise<{ success: boolean }> }; GITHUB_REPOSITORY?: string; GITHUB_API_TOKEN?: string; GITHUB_OAUTH_CLIENT_ID?: string; GITHUB_OAUTH_CLIENT_SECRET?: string; GITHUB_OAUTH_CALLBACK_URL?: string; RUSTKORE_ADMIN_GITHUB_IDS?: string; RUSTKORE_REVIEWER_GITHUB_IDS?: string; github_api?: { fetch(request: Request): Promise<Response> }; HEARTBEAT_INTERVAL_SECONDS?: string; LEASE_DURATION_SECONDS?: string };
+type Env = { rustkore_db: D1Database; ASSETS?: { fetch(request: Request): Promise<Response> }; API_RATE_LIMITER?: { limit(input: { key: string }): Promise<{ success: boolean }> }; GITHUB_REPOSITORY?: string; GITHUB_REPOSITORY_ID?: string; GITHUB_API_TOKEN?: string; GITHUB_OAUTH_CLIENT_ID?: string; GITHUB_OAUTH_CLIENT_SECRET?: string; GITHUB_OAUTH_CALLBACK_URL?: string; RUSTKORE_ADMIN_GITHUB_IDS?: string; RUSTKORE_REVIEWER_GITHUB_IDS?: string; github_api?: { fetch(request: Request): Promise<Response> }; HEARTBEAT_INTERVAL_SECONDS?: string; LEASE_DURATION_SECONDS?: string };
 type Identity = { id: string; role: Role; collaboratorId: string; agentId: string | null; name: string; githubUserId: number | null; githubLogin: string | null };
 type WebIdentity = { collaboratorId: string; githubUserId: number; githubLogin: string; name: string; avatarUrl: string | null; reviewerEnabled: boolean; isAdmin: boolean };
 
@@ -198,9 +198,22 @@ async function anonymousRateLimited(request: Request, env: Env, bucket: string) 
 	return Boolean(env.API_RATE_LIMITER && !(await env.API_RATE_LIMITER.limit({ key: `${bucket}:${ip}` })).success);
 }
 
-async function githubRepositoryPath(path: string, env: Env) {
-	const repository = env.GITHUB_REPOSITORY ?? "boscv/RustKore";
+function configuredGitHubRepository(env: Env) {
+	const repository = env.GITHUB_REPOSITORY, repositoryId = env.GITHUB_REPOSITORY_ID;
+	if (!repository || !repositoryId) throw new Error("GitHub repository identity is not configured (GITHUB_REPOSITORY and GITHUB_REPOSITORY_ID are required)");
 	if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error("GitHub repository is misconfigured");
+	if (!/^\d+$/.test(repositoryId)) throw new Error("GitHub repository ID is misconfigured; expected a numeric repository ID");
+	if (repository.toLowerCase() !== "boscv/rustkore" || repositoryId !== "1472554035") throw new Error("GitHub repository identity is misconfigured; expected boscv/RustKore (1472554035)");
+	return { repository, repositoryId };
+}
+
+function assertPullRequestRepository(pull: any, identity: { repository: string; repositoryId: string }, commitSha: string) {
+	if (String(pull.base?.repo?.id ?? "") !== identity.repositoryId || String(pull.base?.repo?.full_name ?? "").toLowerCase() !== identity.repository.toLowerCase()) throw new Error("Pull request base repository identity does not match the configured software repository");
+	if (String(pull.head?.sha ?? "").toLowerCase() !== commitSha.toLowerCase()) throw new Error("Pull request head SHA does not match the submitted commit SHA");
+}
+
+async function githubRepositoryPath(path: string, env: Env) {
+	const { repository } = configuredGitHubRepository(env);
 	const headers = new Headers({ accept: "application/vnd.github+json", "user-agent": "RustKore/0.1", "x-github-api-version": "2022-11-28" });
 	if (env.GITHUB_API_TOKEN) headers.set("authorization", `Bearer ${env.GITHUB_API_TOKEN}`);
 	const request = new Request(`https://api.github.com/repos/${repository}${path}`, { headers, signal: AbortSignal.timeout(5000) });
@@ -210,7 +223,7 @@ async function githubRepositoryPath(path: string, env: Env) {
 }
 
 async function verifyGitHubSubmission(commitSha: string, pullRequestUrl: string | null, githubUserId: number | null, env: Env) {
-	const repository = env.GITHUB_REPOSITORY ?? "boscv/RustKore";
+	const identity = configuredGitHubRepository(env), repository = identity.repository;
 	if (!githubUserId) throw new Error("Link this MCP credential to a GitHub account before submitting work");
 	if (!pullRequestUrl) throw new Error("A pull request in the configured repository is required");
 	const commit = await githubRepositoryPath(`/commits/${commitSha}`, env);
@@ -220,7 +233,7 @@ async function verifyGitHubSubmission(commitSha: string, pullRequestUrl: string 
 	const match = parsed.hostname === "github.com" && parsed.protocol === "https:" && parsed.pathname.match(new RegExp(`^/${repository.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}/pull/(\\d+)/?$`, "i"));
 	if (!match || parsed.search || parsed.hash || parsed.username || parsed.password) throw new Error("pullRequestUrl must point to a pull request in the configured repository");
 	const pull = await githubRepositoryPath(`/pulls/${match[1]}`, env);
-	if (pull.base?.repo?.full_name?.toLowerCase() !== repository.toLowerCase() || String(pull.head?.sha).toLowerCase() !== commitSha.toLowerCase()) throw new Error("Pull request must target the configured repository and its head commit must match commitSha");
+	assertPullRequestRepository(pull, identity, commitSha);
 	if (Number(pull.user?.id) !== githubUserId) throw new Error("The pull request must be opened by the GitHub account linked to this MCP credential");
 	if (Number(commit.author?.id) !== githubUserId) throw new Error("The submitted commit must be authored by the GitHub account linked to this MCP credential");
 	return { pullRequestUrl: `https://github.com/${repository}/pull/${Number(match[1])}`, commitAuthorId: Number(commit.author.id) };
@@ -735,7 +748,7 @@ async function publicDashboard(db: D1Database) {
 
 async function publicRoadmap(db: D1Database, scenario: "actual" | "demo" = "actual") {
 	if (scenario === "actual" && cachedRoadmap && cachedRoadmap.expires > Date.now()) return cachedRoadmap.content;
-	const [milestones, categories, coverage] = await Promise.all([
+	const [milestones, categories, coverage, acceptance] = await Promise.all([
 		db.prepare("SELECT id,name,target_version AS targetVersion,objective,release_acceptance_json AS acceptanceJson,status,position FROM roadmap_milestones ORDER BY position").all<any>(),
 		db.prepare("SELECT id,name,position FROM roadmap_categories ORDER BY position").all<any>(),
 		db.prepare(`SELECT f.category_id AS categoryId,f.milestone_id AS milestoneId,COUNT(*) AS total,
@@ -747,17 +760,26 @@ async function publicRoadmap(db: D1Database, scenario: "actual" | "demo" = "actu
 			SUM(CASE WHEN f.is_required=1 AND s.state='verified' THEN 1 ELSE 0 END) AS requiredVerified
 			FROM roadmap_features f LEFT JOIN roadmap_feature_status s ON s.feature_id=f.id AND s.scenario=?
 			WHERE f.active=1 GROUP BY f.category_id,f.milestone_id`).bind(scenario).all<any>(),
+		db.prepare(`SELECT c.id,c.milestone_id AS milestoneId,c.description,c.state,c.evidence_url AS evidenceUrl,
+			c.verified_at AS verifiedAt,c.updated_at AS updatedAt,verified.github_login AS verifiedBy
+			FROM release_acceptance_criteria c LEFT JOIN collaborators verified ON verified.id=c.verified_by
+			ORDER BY c.milestone_id,c.id`).all<any>(),
 	]);
 	const sums = coverage.results.reduce((acc: any, cell: any) => {
 		acc.total += Number(cell.total); acc.verified += Number(cell.verified); acc.requiredTotal += Number(cell.requiredTotal); acc.requiredVerified += Number(cell.requiredVerified); return acc;
 	}, { total: 0, verified: 0, requiredTotal: 0, requiredVerified: 0 });
-	const orderedMilestones = milestones.results.map((m: any) => { let acceptanceCriteria: string[] = []; try { acceptanceCriteria = JSON.parse(m.acceptanceJson); } catch {} const { acceptanceJson: _acceptanceJson, ...milestone } = m; return { ...milestone, acceptanceCriteria, readiness: { verified: 0, total: 0 } }; });
+	const orderedMilestones = milestones.results.map((m: any) => { const { acceptanceJson: _acceptanceJson, ...milestone } = m; return { ...milestone, acceptanceCriteria: acceptance.results.filter((item: any) => item.milestoneId === m.id), readiness: { verified: 0, total: 0 }, acceptanceReadiness: { verified: 0, total: 0 } }; });
 	for (let i = 0; i < orderedMilestones.length; i++) {
 		const accepted = new Set(orderedMilestones.slice(0, i + 1).map((m: any) => m.id));
 		for (const cell of coverage.results) if (accepted.has(cell.milestoneId)) {
 			orderedMilestones[i].readiness.verified += Number(cell.requiredVerified);
 			orderedMilestones[i].readiness.total += Number(cell.requiredTotal);
 		}
+		for (const criterion of acceptance.results) if (accepted.has(criterion.milestoneId)) {
+			orderedMilestones[i].acceptanceReadiness.total++;
+			if (criterion.state === "verified") orderedMilestones[i].acceptanceReadiness.verified++;
+		}
+		orderedMilestones[i].complete = orderedMilestones[i].readiness.total > 0 && orderedMilestones[i].readiness.verified >= orderedMilestones[i].readiness.total && orderedMilestones[i].acceptanceReadiness.verified >= orderedMilestones[i].acceptanceReadiness.total;
 	}
 	const plannedMilestones = orderedMilestones.filter((m: any) => m.status === "planned");
 	const next = plannedMilestones.find((m: any) => m.readiness.verified < m.readiness.total) || plannedMilestones[0] || orderedMilestones.at(-1);
@@ -850,7 +872,7 @@ async function importRoadmapCatalog(db: D1Database, catalog: any, identity: WebI
 			SELECT json_extract(value,'$.id'),json_extract(value,'$.categoryId'),json_extract(value,'$.title'),json_extract(value,'$.description'),json_extract(value,'$.milestoneId'),json_extract(value,'$.required'),json_extract(value,'$.acceptanceCriteria'),json_extract(value,'$.upstreamReferences'),unixepoch(),unixepoch() FROM json_each(?) WHERE true
 			ON CONFLICT(id) DO UPDATE SET category_id=excluded.category_id,title=excluded.title,description=excluded.description,milestone_id=excluded.milestone_id,is_required=excluded.is_required,acceptance_criteria_json=excluded.acceptance_criteria_json,upstream_references_json=excluded.upstream_references_json,active=1,updated_at=unixepoch()`).bind(chunk)),
 		db.prepare("INSERT OR IGNORE INTO roadmap_feature_status (feature_id,scenario,state,updated_at) SELECT id,'actual','planned',unixepoch() FROM roadmap_features WHERE active=1"),
-		db.prepare("INSERT INTO roadmap_catalog_imports (catalog_hash,catalog_version,source_revision,feature_count,imported_by,imported_at) VALUES (?,?,?,?,?,unixepoch())").bind(catalogHash, catalog.catalogVersion, catalog.source.initialResearchRevision, catalog.features.length, identity.collaboratorId),
+		db.prepare("INSERT INTO roadmap_catalog_imports (catalog_hash,catalog_version,source_revision,feature_count,imported_by,imported_at) VALUES (?,?,?,?,?,unixepoch())").bind(catalogHash, catalog.catalogVersion, catalog.source.reviewedMasterRevision ?? catalog.source.initialResearchRevision, catalog.features.length, identity.collaboratorId),
 		db.prepare("INSERT INTO roadmap_change_history (id,feature_id,actor_id,action,details_json,created_at) VALUES (?,NULL,?,'catalog.imported',?,unixepoch())")
 			.bind(id(), identity.collaboratorId, JSON.stringify({ catalogVersion: catalog.catalogVersion, catalogHash, added, changed, removed })),
 	];
@@ -939,6 +961,40 @@ async function dashboardApi(request: Request, env: Env) {
 			ORDER BY h.created_at DESC,h.id DESC LIMIT ?`).bind(featureId, featureId, cursor ? 1 : null, cursor?.createdAt ?? 0, cursor?.createdAt ?? 0, cursor?.id ?? "", limit + 1).all<any>();
 		const hasMore = rows.results.length > limit, items = rows.results.slice(0, limit), last = items.at(-1);
 		return json({ items: items.map((item: any) => { try { return { ...item, details: JSON.parse(item.detailsJson) }; } catch { return { ...item, details: {} }; } }), nextCursor: hasMore && last ? btoa(JSON.stringify({ createdAt: last.createdAt, id: last.id })) : null }, 200, { "cache-control": "no-store" });
+	}
+	const acceptanceMatch = path.match(/^\/api\/admin\/roadmap\/acceptance\/([^/]+)$/);
+	if (acceptanceMatch && request.method === "PATCH") {
+		const criterionId = decodeURIComponent(acceptanceMatch[1]), body = await request.json<any>();
+		if (!(["planned", "testing", "verified"] as string[]).includes(body.state) || Object.keys(body).some((key) => !["state", "evidenceUrl", "reason"].includes(key))) return json({ error: "Set a supported release acceptance state, evidenceUrl, and reason" }, 400);
+		if (typeof body.reason !== "string" || body.reason.trim().length < 8 || body.reason.length > 800) return json({ error: "Provide a verification or invalidation reason (8–800 characters)" }, 400);
+		const current = await db.prepare("SELECT id,milestone_id AS milestoneId,description,state,evidence_url AS evidenceUrl FROM release_acceptance_criteria WHERE id=?").bind(criterionId).first<any>();
+		if (!current) return json({ error: "Release acceptance criterion not found" }, 404);
+		if (current.state === "verified" && body.state === "planned") return json({ error: "Invalidate a verified criterion to testing before returning it to planned" }, 409);
+		let evidenceUrl: string | null = body.evidenceUrl == null || body.evidenceUrl === "" ? null : text(body.evidenceUrl, "evidenceUrl", 2048);
+		if (body.state === "verified") {
+			if (!evidenceUrl) return json({ error: "A public validation evidence URL is required before verification" }, 409);
+			try { const parsed = new URL(evidenceUrl); if (parsed.protocol !== "https:" || parsed.username || parsed.password || !parsed.hostname.includes(".") || parsed.hostname === "localhost" || parsed.hostname.endsWith(".localhost") || parsed.hostname.endsWith(".local") || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(parsed.hostname) || parsed.hostname.startsWith("[")) throw new Error(); evidenceUrl = parsed.toString(); }
+			catch { return json({ error: "Evidence URL must use a public HTTPS hostname without embedded credentials" }, 400); }
+			if (!identity.githubLogin) return json({ error: "A linked maintainer GitHub identity is required" }, 403);
+		}
+		if (current.state === body.state && current.evidenceUrl === evidenceUrl) return json({ updated: false, unchanged: true, criterionId });
+		const changeId = id(), ts = now(), verified = body.state === "verified";
+		const oldValue = { state: current.state, evidenceUrl: current.evidenceUrl };
+		const newValue = { state: body.state, evidenceUrl };
+		const result = await db.batch([
+			db.prepare(`UPDATE release_acceptance_criteria SET state=?,evidence_url=?,verified_by=?,verified_at=?,updated_by=?,updated_at=?,change_reason=?,last_change_id=?
+				WHERE id=? AND state=? AND (evidence_url IS ? OR evidence_url=?) RETURNING id`)
+				.bind(body.state, evidenceUrl, verified ? identity.collaboratorId : null, verified ? ts : null, identity.collaboratorId, ts, body.reason.trim(), changeId, criterionId, current.state, current.evidenceUrl, current.evidenceUrl),
+			db.prepare(`INSERT INTO release_acceptance_history (id,criterion_id,actor_id,action,previous_json,current_json,reason,created_at)
+				SELECT ?,id,?,?,?,?,?,? FROM release_acceptance_criteria WHERE id=? AND last_change_id=?`)
+				.bind(changeId, identity.collaboratorId, verified ? "acceptance.verified" : body.state === "testing" && current.state === "verified" ? "acceptance.invalidated" : "acceptance.updated", JSON.stringify(oldValue), JSON.stringify(newValue), body.reason.trim(), ts, criterionId, changeId),
+			db.prepare(`INSERT INTO roadmap_change_history (id,feature_id,actor_id,action,details_json,created_at,scenario)
+				SELECT ?,NULL,?,?,json_object('criterionId',?,'milestoneId',?,'from',?,'to',?,'reason',?),?,'actual' WHERE EXISTS(SELECT 1 FROM release_acceptance_criteria WHERE id=? AND last_change_id=?)`)
+				.bind(id(), identity.collaboratorId, verified ? "acceptance.verified" : body.state === "testing" && current.state === "verified" ? "acceptance.invalidated" : "acceptance.updated", criterionId, current.milestoneId, current.state, body.state, body.reason.trim(), ts, criterionId, changeId),
+		]);
+		if (!result[0].results?.length) return json({ error: "Release acceptance criterion changed concurrently; reload and retry" }, 409);
+		cachedRoadmap = null;
+		return json({ updated: true, criterionId, state: body.state, verifiedBy: verified ? identity.githubLogin : null, verifiedAt: verified ? ts : null });
 	}
 	const roadmapFeatureMatch = path.match(/^\/api\/admin\/roadmap\/features\/([^/]+)$/);
 	if (roadmapFeatureMatch && request.method === "PATCH") {
@@ -1194,7 +1250,8 @@ async function dashboardApi(request: Request, env: Env) {
 			await verifyGitHubSubmission(submission.commitSha, submission.pullRequestUrl, submission.githubUserId, env);
 			const pullNumber = Number(new URL(submission.pullRequestUrl).pathname.split("/").at(-1));
 			const pull = await githubRepositoryPath(`/pulls/${pullNumber}`, env);
-			if (pull.merged !== true || pull.base?.repo?.full_name?.toLowerCase() !== (env.GITHUB_REPOSITORY ?? "boscv/RustKore").toLowerCase() || String(pull.head?.sha).toLowerCase() !== submission.commitSha.toLowerCase() || !/^[0-9a-f]{40}$/i.test(pull.merge_commit_sha ?? "")) return json({ error: "The approved pull request is not merged at the verified commit" }, 409);
+			assertPullRequestRepository(pull, configuredGitHubRepository(env), submission.commitSha);
+			if (pull.merged !== true || !/^[0-9a-f]{40}$/i.test(pull.merge_commit_sha ?? "")) return json({ error: "The approved pull request is not merged at the verified commit" }, 409);
 			const integration = await db.prepare(`INSERT INTO integrations (id,task_id,submission_id,submitted_commit_sha,merge_commit_sha,integrated_by,integrated_at)
 				SELECT ?,s.task_id,s.id,s.commit_sha,?,?,unixepoch() FROM submissions s WHERE s.id=? AND s.status='accepted' AND s.commit_sha=? AND s.pull_request_url=? RETURNING id`)
 				.bind(id(), pull.merge_commit_sha.toLowerCase(), identity.collaboratorId, submissionId, submission.commitSha, submission.pullRequestUrl).first();

@@ -79,7 +79,7 @@ function renderHero() {
 }
 
 function milestoneState(milestone) {
-	if (milestone.readiness?.total > 0 && Number(milestone.readiness.verified) >= Number(milestone.readiness.total)) return "complete";
+	if (milestone.complete === true) return "complete";
 	return milestone.status === "developing" ? "current" : "planned";
 }
 
@@ -268,7 +268,22 @@ function renderAcceptance() {
 	$("#acceptance-caption").textContent = "Required scope accumulates from earlier milestones; optional items do not block a release.";
 	const criteria = selected.acceptanceCriteria || [];
 	if (!criteria.length) { const empty = node("li", "acceptance-empty", "No release acceptance checklist is defined for this milestone yet."); list.append(empty); return; }
-	criteria.forEach((criterion) => { const item = node("li", "acceptance-item"); item.append(stateIcon("planned"), node("span", "", criterion), node("span", "acceptance-state", "Planned")); list.append(item); });
+	criteria.forEach((criterion) => {
+		const item = node("li", "acceptance-item"), state = criterion.state || "planned";
+		item.append(stateIcon(state), node("span", "", criterion.description), node("span", "acceptance-state", stateName[state] || "Planned"));
+		if (isAdmin && scenario === "actual") {
+			const controls = node("div", "roadmap-admin-controls"), statusLabel = node("label", "", "State"), status = node("select");
+			status.setAttribute("aria-label", `State for ${criterion.id}`);
+			["planned", "testing", "verified"].forEach((value) => { const option = node("option", "", stateName[value]); option.value = value; status.append(option); }); status.value = state;
+			statusLabel.append(status);
+			const evidenceLabel = node("label", "", "Public evidence URL"), evidence = node("input"); evidence.type = "url"; evidence.maxLength = 2048; evidence.value = criterion.evidenceUrl || ""; evidenceLabel.append(evidence);
+			const reasonLabel = node("label", "", "Reason"), reason = node("input"); reason.maxLength = 800; reasonLabel.append(reason);
+			const save = node("button", "button button-small", "Save acceptance status"); save.type = "button";
+			save.addEventListener("click", async () => { try { await request(`/api/admin/roadmap/acceptance/${encodeURIComponent(criterion.id)}`, { method: "PATCH", body: JSON.stringify({ state: status.value, evidenceUrl: evidence.value, reason: reason.value }) }); notice("Release acceptance status updated."); await refresh(); } catch (error) { notice(error.message); } });
+			controls.append(statusLabel, evidenceLabel, reasonLabel, save); item.append(controls);
+		}
+		list.append(item);
+	});
 }
 
 function renderHistory(items, append = false) {

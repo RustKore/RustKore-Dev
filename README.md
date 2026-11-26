@@ -2,7 +2,7 @@
 
 **Open Collaborative Development**
 
-A lightweight collaboration platform for coordinating distributed development of RustKore. It is intended to support an open-source community project; the RustKore-DEV license decision is pending, as described under License.
+A lightweight collaboration platform for coordinating distributed development of RustKore. It supports an open-source community project and is licensed under AGPL-3.0-only.
 
 This repository contains the RustKore collaboration platform: a Cloudflare Worker, D1 schema and migrations, a public dashboard, GitHub OAuth, administrative tools, and a stateless MCP Streamable HTTP server. It is separate from the Rust software repository, [boscv/RustKore](https://github.com/boscv/RustKore). The public dashboard and MCP service run at [rustkore.boscv.workers.dev](https://rustkore.boscv.workers.dev/).
 
@@ -86,13 +86,13 @@ The local database is separate from production. Use `npm run demo:local` to add 
 
 The Worker configuration in `wrangler.jsonc` defines the D1 binding `rustkore_db`, routing, public non-secret variables, and rate limiting. Set these variables per environment:
 
-- `GITHUB_REPOSITORY=boscv/RustKore` — the **software** repository whose PRs are verified.
+- `GITHUB_REPOSITORY=boscv/RustKore` and `GITHUB_REPOSITORY_ID=1472554035` — both the name and immutable GitHub ID of the **software** repository whose PRs are verified. The Worker rejects submissions and integrations if either value is missing or mismatched.
 - `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CALLBACK_URL`, and `RUSTKORE_ADMIN_GITHUB_IDS`.
 - Optional `RUSTKORE_REVIEWER_GITHUB_IDS`, `HEARTBEAT_INTERVAL_SECONDS`, and `LEASE_DURATION_SECONDS`.
 
 Configure `GITHUB_OAUTH_CLIENT_SECRET` and `GITHUB_API_TOKEN` as Cloudflare Worker secrets (or local `.dev.vars` values). The GitHub API token should be a fine-grained, read-only credential scoped only to `boscv/RustKore`, with access needed to read repository contents and pull requests. The OAuth application requests the user's public profile and uses the configured callback, for example `https://rustkore.boscv.workers.dev/auth/callback`. Never store secret values in `wrangler.jsonc` or version control.
 
-The first administrator is selected by the GitHub numeric ID allowlist. Administrators manage tasks, shared context, collaborator access, review permissions, integrations, and manual recognitions from the protected dashboard area. Authorization is enforced by the Worker. Reviewers cannot review their own submissions. Approval does not itself merge code; a maintainer records integration only after the Worker verifies the merged PR against GitHub.
+The first administrator is selected by the GitHub numeric ID allowlist. Administrators manage tasks, shared context, collaborator access, review permissions, integrations, manual recognitions, and functional/release acceptance verification from the protected dashboard area. Functional coverage and release readiness remain separate; integrated milestone criteria require public evidence, maintainer identity, verification date, and a recorded reason. A milestone is complete only when both mandatory functional requirements and cumulative integrated acceptance criteria are verified. Authorization is enforced by the Worker. Reviewers cannot review their own submissions. Approval does not itself merge code; a maintainer records integration only after the Worker verifies the merged PR against GitHub.
 
 ## Data and Cloudflare limits
 
@@ -116,4 +116,4 @@ The tests exercise authorization, concurrent claims, lease expiry and recovery, 
 
 ## License
 
-This repository currently has no `LICENSE` file. Choose and add a license before describing this platform repository as open-source software or accepting redistribution under assumed terms. Do not infer a license from the RustKore software repository or from its upstream reference.
+The RustKore-DEV platform is licensed under the GNU Affero General Public License v3.0 only (`AGPL-3.0-only`). See [LICENSE](LICENSE) for the complete license text. This license applies to the platform repository only; the RustKore software repository has a separate licensing decision.

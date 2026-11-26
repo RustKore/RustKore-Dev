@@ -12,7 +12,10 @@ import publicHistoryIndexesMigration from "../migrations/0008_public_history_ind
 import activityTimelineIndexesMigration from "../migrations/0009_activity_timeline_indexes.sql?raw";
 import collaboratorPublicLoginIndexMigration from "../migrations/0010_collaborator_public_login_index.sql?raw";
 import featureRoadmapMigration from "../migrations/0011_feature_roadmap.sql?raw";
+import refinedRoadmapMigration from "../migrations/0012_feature_roadmap_refined_catalog.sql?raw";
+import releaseAcceptanceMigration from "../migrations/0013_release_acceptance_status.sql?raw";
 import roadmapCatalogFixture from "./fixtures/feature-roadmap-import.json";
+import roadmapMigrationReference from "./fixtures/feature-roadmap-migration-reference.json";
 
 const db = (env as any).rustkore_db as D1Database;
 let githubHeadSha: string | null = null;
@@ -20,11 +23,12 @@ let nextGithubId = 1000;
 const commitOwners = new Map<string, number>();
 const pullHeads = new Map<number, string>();
 const pullAuthors = new Map<number, number>();
-const runtimeEnv = { ...(env as any), GITHUB_REPOSITORY: "boscv/RustKore", RUSTKORE_ADMIN_GITHUB_IDS: "99999", github_api: { async fetch(request: Request) {
+let githubPullOverrides: Record<string, unknown> = {};
+const runtimeEnv = { ...(env as any), GITHUB_REPOSITORY: "boscv/RustKore", GITHUB_REPOSITORY_ID: "1472554035", RUSTKORE_ADMIN_GITHUB_IDS: "99999", github_api: { async fetch(request: Request) {
 	const url = new URL(request.url), value = url.pathname.split("/").at(-1)!;
 	if (url.hostname === "github.com") return new Response(JSON.stringify({ access_token: "discarded-oauth-access-token" }), { status: 200 });
 	if (url.pathname === "/user") return new Response(JSON.stringify({ id: 75000, login: "external-collaborator", name: "External Collaborator", avatar_url: "https://avatars.githubusercontent.com/u/75000" }), { status: 200 });
-	if (url.pathname.includes("/pulls/")) return new Response(JSON.stringify({ user: { id: pullAuthors.get(Number(value)) ?? Number(value) }, base: { repo: { full_name: "boscv/RustKore" } }, head: { sha: githubHeadSha ?? pullHeads.get(Number(value)) ?? "" }, merged: true, merge_commit_sha: "f".repeat(40) }), { status: 200 });
+	if (url.pathname.includes("/pulls/")) return new Response(JSON.stringify({ user: { id: pullAuthors.get(Number(value)) ?? Number(value) }, base: { repo: { id: 1472554035, full_name: "boscv/RustKore" } }, head: { sha: githubHeadSha ?? pullHeads.get(Number(value)) ?? "" }, merged: true, merge_commit_sha: "f".repeat(40), ...githubPullOverrides }), { status: 200 });
 	return new Response(JSON.stringify({ sha: value, author: { id: commitOwners.get(value.toLowerCase()) ?? 1 } }), { status: 200 });
 } } };
 let adminToken = "";
@@ -37,15 +41,15 @@ async function request(path: string, method: string, token?: string, body?: unkn
 	}), runtimeEnv as any);
 }
 async function json<T = any>(response: Response): Promise<T> { return response.json() as Promise<T>; }
-async function rpc(token: string, method: string, params: any = {}, requestId = 1) {
+async function rpc(token: string, method: string, params: any = {}, requestId = 1, requestEnv: any = runtimeEnv) {
 	const response = await worker.fetch(new Request("https://rustkore.test/mcp", {
 		method: "POST", headers: { authorization: `Bearer ${token}`, accept: "application/json, text/event-stream", "content-type": "application/json", "mcp-protocol-version": "2025-11-25" },
 		body: JSON.stringify({ jsonrpc: "2.0", id: requestId, method, params }),
-	}), runtimeEnv as any);
+	}), requestEnv);
 	const body = await json<any>(response);
 	return { response, body, output: body.result?.structuredContent ?? body.result?.content?.[0]?.text };
 }
-async function tool(token: string, name: string, args: any = {}) { return rpc(token, "tools/call", { name, arguments: args }); }
+async function tool(token: string, name: string, args: any = {}, requestId = 1, requestEnv: any = runtimeEnv) { return rpc(token, "tools/call", { name, arguments: args }, requestId, requestEnv); }
 async function credential(name: string, role: "collaborator" | "reviewer", agentName?: string) {
 	const githubUserId = nextGithubId++, collaboratorId = crypto.randomUUID(), agentId = role === "collaborator" ? crypto.randomUUID() : null;
 	const tokenId = crypto.randomUUID(), token = `local-agent-token-${crypto.randomUUID()}`, digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
@@ -74,11 +78,11 @@ async function createWebSession(collaboratorId: string) {
 		.bind(await digest(session), await digest(csrf), collaboratorId).run();
 	return { cookie: `rk_session=${session}; rk_csrf=${csrf}`, csrf };
 }
-async function webRequest(path: string, method: string, session: { cookie: string; csrf: string }, body?: unknown) {
+async function webRequest(path: string, method: string, session: { cookie: string; csrf: string }, body?: unknown, requestEnv: any = runtimeEnv) {
 	return worker.fetch(new Request(`https://rustkore.test${path}`, {
 		method, headers: { cookie: session.cookie, origin: "https://rustkore.test", "x-csrf-token": session.csrf, ...(body ? { "content-type": "application/json" } : {}) },
 		...(body ? { body: JSON.stringify(body) } : {}),
-	}), runtimeEnv as any);
+	}), requestEnv);
 }
 
 function migrationQueries(source: string) {
@@ -109,6 +113,8 @@ beforeAll(async () => {
 		{ name: "0009_activity_timeline_indexes.sql", queries: migrationQueries(activityTimelineIndexesMigration) },
 		{ name: "0010_collaborator_public_login_index.sql", queries: migrationQueries(collaboratorPublicLoginIndexMigration) },
 		{ name: "0011_feature_roadmap.sql", queries: migrationQueries(featureRoadmapMigration) },
+		{ name: "0012_feature_roadmap_refined_catalog.sql", queries: migrationQueries(refinedRoadmapMigration) },
+		{ name: "0013_release_acceptance_status.sql", queries: migrationQueries(releaseAcceptanceMigration) },
 	]);
 	const collaboratorId = crypto.randomUUID(), tokenId = crypto.randomUUID();
 	adminToken = `local-admin-token-${crypto.randomUUID()}`;
@@ -121,6 +127,29 @@ beforeAll(async () => {
 });
 
 describe("RustKore coordinator and stateless MCP", () => {
+	it("rejects repository identity, base repository, and commit SHA mismatches before creating submissions", async () => {
+		const owner = await credential("Repository identity adversary", "collaborator", "repository-identity-adversary");
+		const cases: Array<{ label: string; env?: any; override?: Record<string, unknown>; shaOverride?: string }> = [
+			{ label: "platform repository", override: { base: { repo: { id: 1472413946, full_name: "boscv/RustKore-DEV" } } } },
+			{ label: "wrong repository ID", override: { base: { repo: { id: 1472413946, full_name: "boscv/RustKore" } } } },
+			{ label: "wrong repository name", override: { base: { repo: { id: 1472554035, full_name: "boscv/RustKore-DEV" } } } },
+			{ label: "missing repository ID in response", override: { base: { repo: { full_name: "boscv/RustKore" } } } },
+			{ label: "missing repository ID configuration", env: { ...runtimeEnv, GITHUB_REPOSITORY_ID: undefined } },
+			{ label: "nonnumeric repository ID configuration", env: { ...runtimeEnv, GITHUB_REPOSITORY_ID: "rustkore" } },
+			{ label: "divergent head SHA", shaOverride: "a".repeat(40) },
+		];
+		for (const [index, testCase] of cases.entries()) {
+			const task = await addTask(`Repository identity rejected ${index}`, 50), claim = await tool(owner.token, "claim_task");
+			const sha = (99000 + index).toString(16).padStart(40, "0"), pullNumber = 99000 + index;
+			commitOwners.set(sha, owner.githubUserId); pullHeads.set(pullNumber, sha); pullAuthors.set(pullNumber, owner.githubUserId);
+			githubPullOverrides = testCase.override ?? {}; githubHeadSha = testCase.shaOverride ?? null;
+			const result = await tool(owner.token, "submit_task", { taskId: task.id, leaseId: claim.output.task.leaseId, commitSha: sha, pullRequestUrl: `https://github.com/boscv/RustKore/pull/${pullNumber}`, summary: testCase.label }, 1, testCase.env ?? runtimeEnv);
+			expect(result.body.result.isError, testCase.label).toBe(true);
+			expect((await db.prepare("SELECT COUNT(*) AS n FROM submissions WHERE commit_sha=?").bind(sha).first<any>()).n, testCase.label).toBe(0);
+		}
+		githubPullOverrides = {}; githubHeadSha = null;
+	});
+
 	it("serves current stateless MCP discovery and rejects cross-origin, malformed versions, and invalid commit references", async () => {
 		const discover = await worker.fetch(new Request("https://rustkore.test/mcp", {
 			method: "POST", headers: { accept: "application/json, text/event-stream", "content-type": "application/json", "mcp-protocol-version": "2026-07-28" },
@@ -238,6 +267,15 @@ describe("RustKore coordinator and stateless MCP", () => {
 		expect(reviewed.output.decision).toBe("accepted");
 		const integrated = await worker.fetch(new Request(`https://rustkore.test/api/admin/submissions/${submitted.output.submissionId}/integrate`, { method: "POST", headers: { cookie: cookieHeader, origin: "https://rustkore.test", "x-csrf-token": csrf } }), oauthEnv as any);
 		expect(integrated.status).toBe(200);
+		const unmergedSha = (75001).toString(16).padStart(40, "0"), unmergedTask = await addTask("Reject an unmerged pull request", 100), unmergedClaim = await tool(issued.token, "claim_task");
+		commitOwners.set(unmergedSha, 75000); pullHeads.set(75001, unmergedSha); pullAuthors.set(75001, 75000);
+		const unmergedSubmission = await tool(issued.token, "submit_task", { taskId: unmergedTask.id, leaseId: unmergedClaim.output.task.leaseId, commitSha: unmergedSha, pullRequestUrl: "https://github.com/boscv/RustKore/pull/75001", summary: "Awaiting a merge" });
+		const unmergedReview = await tool(independentReviewer.token, "review_task", { submissionId: unmergedSubmission.output.submissionId, decision: "accepted" });
+		expect(unmergedReview.output.decision).toBe("accepted"); githubPullOverrides = { merged: false };
+		const unmergedIntegration = await worker.fetch(new Request(`https://rustkore.test/api/admin/submissions/${unmergedSubmission.output.submissionId}/integrate`, { method: "POST", headers: { cookie: cookieHeader, origin: "https://rustkore.test", "x-csrf-token": csrf } }), oauthEnv as any);
+		expect(unmergedIntegration.status).toBe(409);
+		expect(await db.prepare("SELECT 1 FROM integrations WHERE submission_id=?").bind(unmergedSubmission.output.submissionId).first()).toBeNull();
+		githubPullOverrides = {};
 		const publicProgress = await json<any>(await worker.fetch(new Request("https://rustkore.test/api/dashboard"), oauthEnv as any));
 		expect(Number(publicProgress.summary.integrated)).toBeGreaterThan(0);
 		expect(publicProgress.recentIntegrations.some((item: any) => item.taskId === integrationTask.id)).toBe(true);
@@ -648,6 +686,58 @@ describe("RustKore coordinator and stateless MCP", () => {
 		expect(states.results).toEqual([{ state: "planned", n: 278 }]);
 	});
 
+	it("migrates exactly the versioned catalog without changing IDs, scope, or unrelated records", async () => {
+		const { catalogHash: referenceHash, ...referenceCatalog } = roadmapMigrationReference;
+		const rows = await db.prepare(`SELECT f.id,f.category_id AS categoryId,f.title,f.description,f.milestone_id AS milestoneId,f.is_required AS required,
+			f.acceptance_criteria_json AS acceptanceCriteria,f.upstream_references_json AS upstreamReferences FROM roadmap_features f WHERE f.active=1 ORDER BY f.id`).all<any>();
+		const normalized = rows.results.map((row: any) => ({ ...row, required: Boolean(row.required), acceptanceCriteria: JSON.parse(row.acceptanceCriteria), upstreamReferences: JSON.parse(row.upstreamReferences) }));
+		expect(normalized).toEqual([...roadmapMigrationReference.features].sort((a: any, b: any) => a.id.localeCompare(b.id)).map((feature: any) => ({ ...feature, required: Boolean(feature.required) })));
+		const counts = await db.prepare(`SELECT (SELECT COUNT(*) FROM roadmap_features WHERE active=1) AS featureCount,
+			(SELECT COUNT(*) FROM roadmap_categories) AS categoryCount,(SELECT COUNT(*) FROM roadmap_milestones) AS milestoneCount,
+			(SELECT COUNT(*) FROM release_acceptance_criteria) AS acceptanceCount`).first<any>();
+		const acceptanceCount = Object.values(roadmapMigrationReference.releaseAcceptanceCriteria).reduce((sum: number, items: any) => sum + items.length, 0);
+		expect(counts).toEqual({ featureCount: 278, categoryCount: 18, milestoneCount: 6, acceptanceCount });
+		const imported = await db.prepare("SELECT catalog_hash AS hash,catalog_version AS version,source_revision AS revision,feature_count AS count FROM roadmap_catalog_imports WHERE catalog_version=?").bind(roadmapMigrationReference.catalogVersion).first<any>();
+		expect(imported).toEqual({ hash: referenceHash, version: roadmapMigrationReference.catalogVersion, revision: roadmapMigrationReference.source.reviewedMasterRevision, count: 278 });
+		const history = await db.prepare("SELECT json_extract(details_json,'$.catalogHash') AS hash FROM roadmap_change_history WHERE action='catalog.migration_applied' AND json_extract(details_json,'$.catalogVersion')=?").bind(roadmapMigrationReference.catalogVersion).first<any>();
+		expect(history?.hash).toBe(imported.hash);
+		const legacyImport = await db.prepare("SELECT catalog_hash AS hash FROM roadmap_catalog_imports WHERE catalog_version='1.0.0'").first<any>();
+		const legacyHistory = await db.prepare("SELECT json_extract(details_json,'$.catalogHash') AS hash FROM roadmap_change_history WHERE id='roadmap-initial-catalog'").first<any>();
+		const reconciliation = await db.prepare("SELECT json_extract(details_json,'$.recordedHash') AS recordedHash,json_extract(details_json,'$.registeredHash') AS registeredHash FROM roadmap_change_history WHERE id='roadmap-v1.0.0-hash-reconciliation'").first<any>();
+		expect(legacyHistory.hash).toBe(legacyImport.hash);
+		expect(reconciliation).toEqual({ recordedHash: "6a3d09c23f0e0766df7ab03c3ce54f1e5c429acf1636d06debaa7ce3f715b2ef", registeredHash: legacyImport.hash });
+		const admin = await createWebSession((await db.prepare("SELECT id FROM collaborators WHERE github_user_id=99999").first<any>()).id);
+		const reimport = await webRequest("/api/admin/roadmap/import", "POST", admin, referenceCatalog);
+		expect(await json<any>(reimport)).toMatchObject({ imported: false, unchanged: true, catalogHash: referenceHash });
+	});
+
+	it("authorizes, audits, invalidates, and counts persisted release acceptance criteria independently", async () => {
+		const criterion = await db.prepare("SELECT id,state FROM release_acceptance_criteria WHERE milestone_id='prototype' ORDER BY id LIMIT 1").first<any>();
+		const before = await json<any>(await worker.fetch(new Request("https://rustkore.test/api/roadmap"), runtimeEnv as any));
+		expect(before.milestones[1].acceptanceReadiness).toMatchObject({ verified: 0, total: 6 });
+		expect(before.milestones[1].complete).toBe(false);
+		const contributor = await credential("Acceptance denied", "collaborator", "acceptance-denied"), denied = await createWebSession(contributor.collaboratorId);
+		expect((await webRequest(`/api/admin/roadmap/acceptance/${criterion.id}`, "PATCH", denied, { state: "verified", evidenceUrl: "https://example.org/proof", reason: "Unauthorized attempt" })).status).toBe(403);
+		const adminId = (await db.prepare("SELECT id FROM collaborators WHERE github_user_id=99999").first<any>()).id, admin = await createWebSession(adminId);
+		expect((await webRequest(`/api/admin/roadmap/acceptance/${criterion.id}`, "PATCH", admin, { state: "verified", reason: "Evidence must be required" })).status).toBe(409);
+		const testing = await webRequest(`/api/admin/roadmap/acceptance/${criterion.id}`, "PATCH", admin, { state: "testing", reason: "Integration fixture is ready" });
+		expect(testing.status).toBe(200);
+		const verified = await webRequest(`/api/admin/roadmap/acceptance/${criterion.id}`, "PATCH", admin, { state: "verified", evidenceUrl: "https://example.org/prototype-check", reason: "Authorized fixture confirms the milestone criterion" });
+		expect(verified.status).toBe(200);
+		const after = await json<any>(await worker.fetch(new Request("https://rustkore.test/api/roadmap"), runtimeEnv as any));
+		expect(after.milestones[1].acceptanceReadiness).toMatchObject({ verified: 1, total: 6 });
+		expect(after.milestones[1].complete).toBe(false);
+		expect(after.summary.nextRelease).toEqual(before.summary.nextRelease);
+		const invalidated = await webRequest(`/api/admin/roadmap/acceptance/${criterion.id}`, "PATCH", admin, { state: "testing", reason: "Public evidence was withdrawn" });
+		expect(invalidated.status).toBe(200);
+		const row = await db.prepare("SELECT state,evidence_url AS evidenceUrl,verified_by AS verifiedBy,verified_at AS verifiedAt FROM release_acceptance_criteria WHERE id=?").bind(criterion.id).first<any>();
+		expect(row).toMatchObject({ state: "testing", verifiedBy: null, verifiedAt: null });
+		const history = await db.prepare("SELECT action,actor_id AS actorId,reason FROM release_acceptance_history WHERE criterion_id=? ORDER BY created_at,id").bind(criterion.id).all<any>();
+		expect(history.results).toHaveLength(3);
+		expect(history.results.map((item: any) => item.action)).toEqual(expect.arrayContaining(["acceptance.updated", "acceptance.verified", "acceptance.invalidated"]));
+		expect(history.results.every((item: any) => item.actorId === adminId && item.reason.length >= 8)).toBe(true);
+	});
+
 	it("keeps optional requirements out of release readiness and restricts roadmap changes to maintainers", async () => {
 		const adminId = (await db.prepare("SELECT id FROM collaborators WHERE github_user_id=99999").first<any>()).id;
 		const adminSession = await createWebSession(adminId), contributor = await credential("Roadmap denied contributor", "collaborator", "roadmap-denied");
@@ -759,6 +849,60 @@ describe("RustKore coordinator and stateless MCP", () => {
 		expect(historyBody.items.some((item: any) => item.featureId === "testing.roadmap-import" && item.action === "feature.task_linked" && item.actor === "test-admin")).toBe(true);
 		expect(historyBody.items.some((item: any) => item.featureId === "testing.roadmap-import" && item.action === "feature.verified" && item.actor === "test-admin")).toBe(true);
 		expect(proofBody.evidenceId).toBeTruthy();
+	});
+
+	it("marks a milestone complete only after cumulative mandatory features and integrated acceptance are verified", async () => {
+		const adminId = (await db.prepare("SELECT id FROM collaborators WHERE github_user_id=99999").first<any>()).id, session = await createWebSession(adminId), noRateLimitEnv = { ...runtimeEnv, API_RATE_LIMITER: { async limit() { return { success: true }; } } };
+		const features = await db.prepare("SELECT id FROM roadmap_features WHERE active=1 AND is_required=1 AND milestone_id IN ('foundation','prototype')").all<any>();
+		const statements: D1PreparedStatement[] = [];
+		for (const [index, feature] of features.results.entries()) {
+			const proofId = `gate-fixture-proof-${index}`, changeId = `gate-fixture-status-${index}`;
+			statements.push(db.prepare(`INSERT INTO roadmap_feature_evidence (id,feature_id,scenario,url,label,description,is_valid,created_by,created_at,last_change_id)
+				VALUES (?,?,'actual','https://example.org/deterministic-fixture','Gate fixture','Synthetic local test evidence only',1,?,unixepoch(),?)`).bind(proofId, feature.id, adminId, proofId));
+			statements.push(db.prepare(`UPDATE roadmap_feature_status SET state='verified',updated_by=?,updated_at=unixepoch(),verified_by=?,verified_at=unixepoch(),last_change_id=?,change_reason='Local release gate test fixture' WHERE feature_id=? AND scenario='actual'`).bind(adminId, adminId, changeId, feature.id));
+		}
+		await db.batch(statements);
+		const resetCache = await webRequest(`/api/admin/roadmap/features/${features.results[0].id}`, "PATCH", session, { state: "testing", reason: "Refresh the local release gate cache." }, noRateLimitEnv);
+		expect(resetCache.status).toBe(200);
+		await db.prepare("UPDATE roadmap_feature_status SET state='verified',verified_by=?,verified_at=unixepoch() WHERE feature_id=? AND scenario='actual'").bind(adminId, features.results[0].id).run();
+		const beforeCriteria = await json<any>(await worker.fetch(new Request("https://rustkore.test/api/roadmap"), runtimeEnv as any));
+		expect(beforeCriteria.milestones[1].readiness.verified).toBe(beforeCriteria.milestones[1].readiness.total);
+		expect(beforeCriteria.milestones[1].complete).toBe(false);
+		const criteria = (await db.prepare("SELECT id FROM release_acceptance_criteria WHERE milestone_id IN ('foundation','prototype') ORDER BY milestone_id,id").all<any>()).results;
+		await db.batch(criteria.map((criterion: any, index: number) => db.prepare(`UPDATE release_acceptance_criteria SET state='verified',evidence_url='https://example.org/prototype-integrated-fixture',verified_by=?,verified_at=unixepoch(),updated_by=?,updated_at=unixepoch(),change_reason='Local integrated scenario has been checked.',last_change_id=? WHERE id=?`).bind(adminId, adminId, `gate-fixture-criterion-${index}`, criterion.id)));
+		const refreshAcceptance = await webRequest(`/api/admin/roadmap/acceptance/${criteria[0].id}`, "PATCH", session, { state: "testing", reason: "Refresh the local acceptance gate cache." }, noRateLimitEnv);
+		expect(refreshAcceptance.status).toBe(200);
+		await db.prepare("UPDATE release_acceptance_criteria SET state='verified',evidence_url='https://example.org/prototype-integrated-fixture',verified_by=?,verified_at=unixepoch() WHERE id=?").bind(adminId, criteria[0].id).run();
+		const complete = await json<any>(await worker.fetch(new Request("https://rustkore.test/api/roadmap"), runtimeEnv as any));
+		expect(complete.milestones[1].acceptanceReadiness.verified).toBe(complete.milestones[1].acceptanceReadiness.total);
+		expect(complete.milestones[1].complete).toBe(true);
+		const blockedCriterion = criteria.at(-1)!;
+		const invalidateAcceptance = await webRequest(`/api/admin/roadmap/acceptance/${blockedCriterion.id}`, "PATCH", session, { state: "testing", reason: "Integration evidence has been withdrawn." }, noRateLimitEnv);
+		expect(invalidateAcceptance.status).toBe(200);
+		const noLongerComplete = await json<any>(await worker.fetch(new Request("https://rustkore.test/api/roadmap"), runtimeEnv as any));
+		expect(noLongerComplete.milestones[1].complete).toBe(false);
+	});
+
+	it("invalidates only previously verified requirements whose catalog criteria changed during migration", async () => {
+		const adminId = (await db.prepare("SELECT id FROM collaborators WHERE github_user_id=99999").first<any>()).id;
+		const changedId = "networking.authentication", unchangedId = "networking.server-selection", taskId = "migration-preserved-task";
+		await db.batch([
+			db.prepare("INSERT INTO tasks (id,title,description,acceptance_criteria,priority,status,created_by,created_at,updated_at,module) VALUES (?,?,'Migration preservation fixture','Task stays linked through catalog refresh',50,'open',?,unixepoch(),unixepoch(),'Networking')").bind(taskId,"Migration preservation task",adminId),
+			db.prepare("INSERT INTO roadmap_feature_tasks (id,feature_id,task_id,scenario,linked_by,linked_at,active) VALUES ('migration-preserved-link',?,?,'actual',?,unixepoch(),1)").bind(changedId,taskId,adminId),
+			db.prepare("UPDATE roadmap_features SET acceptance_criteria_json='[\"Superseded acceptance condition\"]' WHERE id=?").bind(changedId),
+			db.prepare("UPDATE roadmap_feature_status SET state='verified',verified_by=?,verified_at=unixepoch(),updated_by=?,change_reason='Existing verified state for migration fixture' WHERE feature_id IN (?,?) AND scenario='actual'").bind(adminId,adminId,changedId,unchangedId),
+			db.prepare("DELETE FROM roadmap_catalog_imports WHERE catalog_version=?").bind(roadmapMigrationReference.catalogVersion),
+			db.prepare("DELETE FROM roadmap_change_history WHERE id=?").bind("roadmap-catalog-1-0-1"),
+		]);
+		await db.batch(migrationQueries(refinedRoadmapMigration).map((sql) => db.prepare(sql)));
+		const states = await db.prepare("SELECT feature_id AS id,state,verified_by AS verifiedBy FROM roadmap_feature_status WHERE feature_id IN (?,?) AND scenario='actual' ORDER BY feature_id").bind(changedId,unchangedId).all<any>();
+		expect(states.results.find((item: any) => item.id === changedId)).toMatchObject({ state: "testing", verifiedBy: null });
+		expect(states.results.find((item: any) => item.id === unchangedId)).toMatchObject({ state: "verified", verifiedBy: adminId });
+		expect(await db.prepare("SELECT 1 FROM roadmap_feature_tasks WHERE id='migration-preserved-link' AND active=1").first()).toBeTruthy();
+		expect(await db.prepare("SELECT 1 FROM roadmap_change_history WHERE feature_id=? AND action='feature.invalidated'").bind(changedId).first()).toBeTruthy();
+		const imported = await db.prepare("SELECT catalog_hash AS hash FROM roadmap_catalog_imports WHERE catalog_version=?").bind(roadmapMigrationReference.catalogVersion).first<any>();
+		const recorded = await db.prepare("SELECT json_extract(details_json,'$.catalogHash') AS hash FROM roadmap_change_history WHERE id='roadmap-catalog-1-0-1'").first<any>();
+		expect(recorded.hash).toBe(imported.hash);
 	});
 
 
