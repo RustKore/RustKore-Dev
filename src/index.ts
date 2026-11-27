@@ -24,7 +24,7 @@ const authHeader = (r: Request) => r.headers.get("authorization")?.match(/^Beare
 const taskCanBeClaimedSql = (alias: string) => `(${alias}.status='open' OR (${alias}.status='claimed' AND ${alias}.lease_until<=unixepoch()))`;
 const taskDependenciesSatisfiedSql = (alias: string) => `NOT EXISTS (
 	SELECT 1 FROM task_dependencies d JOIN tasks parent ON parent.id=d.depends_on_id
-	WHERE d.task_id=${alias}.id AND parent.status!='accepted'
+	WHERE d.task_id=${alias}.id AND NOT EXISTS (SELECT 1 FROM integrations i WHERE i.task_id=parent.id)
 )`;
 const taskClaimEligibleSql = (alias: string) => `(${taskCanBeClaimedSql(alias)} AND ${taskDependenciesSatisfiedSql(alias)})`;
 const taskDashboardStateSql = (alias: string) => `CASE
@@ -209,6 +209,7 @@ function configuredGitHubRepository(env: Env) {
 
 function assertPullRequestRepository(pull: any, identity: { repository: string; repositoryId: string }, commitSha: string) {
 	if (String(pull.base?.repo?.id ?? "") !== identity.repositoryId || String(pull.base?.repo?.full_name ?? "").toLowerCase() !== identity.repository.toLowerCase()) throw new Error("Pull request base repository identity does not match the configured software repository");
+	if (pull.base?.ref !== "main") throw new Error("Pull request must target the main branch of the configured software repository");
 	if (String(pull.head?.sha ?? "").toLowerCase() !== commitSha.toLowerCase()) throw new Error("Pull request head SHA does not match the submitted commit SHA");
 }
 
@@ -310,20 +311,24 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 			const claimed = await db.batch([
 				db.prepare(`UPDATE tasks SET status='claimed', assignee_agent_id=?, lease_id=?, lease_until=unixepoch()+?, updated_at=unixepoch()
 				WHERE id=(SELECT t.id FROM tasks t WHERE ${taskClaimEligibleSql("t")}
-				ORDER BY t.priority DESC,t.created_at ASC LIMIT 1)
+				AND NOT EXISTS (SELECT 1 FROM tasks held WHERE held.assignee_agent_id=? AND held.status='claimed' AND held.lease_until>unixepoch())
+				ORDER BY t.priority DESC,t.created_at ASC,t.id ASC LIMIT 1)
 				AND (status='open' OR (status='claimed' AND lease_until<=unixepoch())) RETURNING id,title,description,acceptance_criteria AS acceptanceCriteria,priority,lease_id AS leaseId,lease_until AS leaseUntil`)
-					.bind(identity.agentId, leaseId, leaseDurationSeconds),
+					.bind(identity.agentId, leaseId, leaseDurationSeconds, identity.agentId),
 				db.prepare(`INSERT INTO activity (id,task_id,actor_id,action,details_json,created_at)
 					SELECT ?,id,?,'task.claimed',?,unixepoch() FROM tasks WHERE lease_id=? AND status='claimed'`).bind(id(), identity.collaboratorId, JSON.stringify({ agentId: identity.agentId }), leaseId),
+				db.prepare(`SELECT id,title,description,acceptance_criteria AS acceptanceCriteria,priority,lease_id AS leaseId,lease_until AS leaseUntil
+					FROM tasks WHERE assignee_agent_id=? AND status='claimed' AND lease_until>unixepoch()
+					ORDER BY lease_until DESC,id ASC LIMIT 1`).bind(identity.agentId),
 			]);
-			const row = claimed[0].results?.[0] as any;
+			const row = (claimed[0].results?.[0] ?? claimed[2].results?.[0]) as any;
 			if (!row) {
 				const attempt = Math.max(0, Math.min(10, Number.isInteger(args.backoffAttempt) ? args.backoffAttempt : 0));
 				const base = Math.min(60, 2 ** attempt), jitter = Math.floor(Math.random() * Math.max(1, Math.ceil(base * 0.25)));
 				return { task: null, message: "No eligible task is currently available", retryAfterSeconds: Math.min(60, base + jitter), nextBackoffAttempt: Math.min(10, attempt + 1) };
 			}
-			invalidateDashboard();
-			return { task: { ...row, heartbeatIntervalSeconds } };
+			if (claimed[0].results?.length) invalidateDashboard();
+			return { task: { ...row, heartbeatIntervalSeconds }, alreadyReserved: !claimed[0].results?.length };
 		}
 		case "get_task": requireRole(identity, "admin", "collaborator", "reviewer"); return getTask(db, text(args.taskId, "taskId", 80));
 		case "heartbeat": {
@@ -431,11 +436,11 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 
 const toolDefinitions = [
 	{ name: "list_tasks", description: "List tasks ordered by priority. Use nextCursor for the next page.", inputSchema: { type: "object", properties: { status: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100 }, cursor: { type: "string" } } } },
-	{ name: "claim_task", description: "Atomically reserve the highest-priority eligible task. Heartbeat every 120 seconds by default. On empty results, pass backoffAttempt and wait retryAfterSeconds.", inputSchema: { type: "object", properties: { backoffAttempt: { type: "integer", minimum: 0, maximum: 10 } }, additionalProperties: false } },
+	{ name: "claim_task", description: "Atomically reserve the highest-priority eligible task, or return this agent's existing active reservation without extending it. Heartbeat every 120 seconds by default. On empty results, pass backoffAttempt and wait retryAfterSeconds.", inputSchema: { type: "object", properties: { backoffAttempt: { type: "integer", minimum: 0, maximum: 10 } }, additionalProperties: false } },
 	{ name: "get_task", description: "Get task details, dependencies, and submissions.", inputSchema: { type: "object", properties: { taskId: { type: "string" } }, required: ["taskId"] } },
 	{ name: "heartbeat", description: "Extend a current task lease. Lease duration is 10 minutes by default.", inputSchema: { type: "object", properties: { taskId: { type: "string" }, leaseId: { type: "string" } }, required: ["taskId", "leaseId"] } },
 	{ name: "release_task", description: "Release a task held by your current lease.", inputSchema: { type: "object", properties: { taskId: { type: "string" }, leaseId: { type: "string" } }, required: ["taskId", "leaseId"] } },
-	{ name: "submit_task", description: "Submit a commit and optional pull request for independent review.", inputSchema: { type: "object", properties: { taskId: { type: "string" }, leaseId: { type: "string" }, commitSha: { type: "string" }, pullRequestUrl: { type: "string" }, summary: { type: "string" } }, required: ["taskId", "leaseId", "commitSha", "summary"] } },
+	{ name: "submit_task", description: "Submit a commit and required pull request targeting main for independent review.", inputSchema: { type: "object", properties: { taskId: { type: "string" }, leaseId: { type: "string" }, commitSha: { type: "string" }, pullRequestUrl: { type: "string" }, summary: { type: "string" } }, required: ["taskId", "leaseId", "commitSha", "pullRequestUrl", "summary"] } },
 	{ name: "review_task", description: "Independently accept or reject a pending submission.", inputSchema: { type: "object", properties: { submissionId: { type: "string" }, decision: { type: "string", enum: ["accepted", "rejected"] }, comment: { type: "string" } }, required: ["submissionId", "decision"] } },
 	{ name: "get_progress", description: "Summarize task states and activity.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
 	{ name: "get_activity", description: "Read paginated task or project activity history.", inputSchema: { type: "object", properties: { taskId: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100 }, cursor: { type: "string" } } } },
@@ -692,7 +697,7 @@ async function publicDashboard(db: D1Database) {
 			SUM(state='integrated') AS integrated,SUM(state='available') AS available,SUM(state='blocked') AS blocked,
 			SUM(state='reserved') AS reserved,SUM(state='in_review') AS inReview,SUM(state='approved') AS approved,
 			(SELECT COUNT(*) FROM collaborators c WHERE c.github_user_id IS NOT NULL AND c.suspended_at IS NULL) AS contributors,
-			(SELECT COUNT(*) FROM tasks t JOIN agents a ON a.id=t.assignee_agent_id JOIN collaborators c ON c.id=a.collaborator_id WHERE t.status='claimed' AND t.lease_until>unixepoch() AND c.suspended_at IS NULL) AS activeAgents
+			(SELECT COUNT(DISTINCT a.id) FROM tasks t JOIN agents a ON a.id=t.assignee_agent_id JOIN collaborators c ON c.id=a.collaborator_id WHERE t.status='claimed' AND t.lease_until>unixepoch() AND c.suspended_at IS NULL) AS activeAgents
 			FROM (SELECT ${state} AS state FROM tasks t)`).first<any>(),
 		db.prepare(`SELECT module,COUNT(*) AS total,SUM(state='integrated') AS integrated,SUM(state='available') AS available,
 			SUM(state='blocked') AS blocked,SUM(state='reserved') AS reserved,SUM(state='in_review') AS inReview,SUM(state='approved') AS approved
