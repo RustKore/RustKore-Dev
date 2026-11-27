@@ -14,6 +14,7 @@ import collaboratorPublicLoginIndexMigration from "../migrations/0010_collaborat
 import featureRoadmapMigration from "../migrations/0011_feature_roadmap.sql?raw";
 import refinedRoadmapMigration from "../migrations/0012_feature_roadmap_refined_catalog.sql?raw";
 import releaseAcceptanceMigration from "../migrations/0013_release_acceptance_status.sql?raw";
+import reservationAndRevisionMigration from "../migrations/0014_reservation_and_revision_integrity.sql?raw";
 import roadmapCatalogFixture from "./fixtures/feature-roadmap-import.json";
 import roadmapMigrationReference from "./fixtures/feature-roadmap-migration-reference.json";
 
@@ -28,7 +29,7 @@ const runtimeEnv = { ...(env as any), GITHUB_REPOSITORY: "boscv/RustKore", GITHU
 	const url = new URL(request.url), value = url.pathname.split("/").at(-1)!;
 	if (url.hostname === "github.com") return new Response(JSON.stringify({ access_token: "discarded-oauth-access-token" }), { status: 200 });
 	if (url.pathname === "/user") return new Response(JSON.stringify({ id: 75000, login: "external-collaborator", name: "External Collaborator", avatar_url: "https://avatars.githubusercontent.com/u/75000" }), { status: 200 });
-	if (url.pathname.includes("/pulls/")) return new Response(JSON.stringify({ user: { id: pullAuthors.get(Number(value)) ?? Number(value) }, base: { repo: { id: 1472554035, full_name: "boscv/RustKore" } }, head: { sha: githubHeadSha ?? pullHeads.get(Number(value)) ?? "" }, merged: true, merge_commit_sha: "f".repeat(40), ...githubPullOverrides }), { status: 200 });
+	if (url.pathname.includes("/pulls/")) return new Response(JSON.stringify({ user: { id: pullAuthors.get(Number(value)) ?? Number(value) }, base: { ref: "main", repo: { id: 1472554035, full_name: "boscv/RustKore" } }, head: { sha: githubHeadSha ?? pullHeads.get(Number(value)) ?? "" }, merged: true, merge_commit_sha: "f".repeat(40), ...githubPullOverrides }), { status: 200 });
 	return new Response(JSON.stringify({ sha: value, author: { id: commitOwners.get(value.toLowerCase()) ?? 1 } }), { status: 200 });
 } } };
 let adminToken = "";
@@ -115,6 +116,7 @@ beforeAll(async () => {
 		{ name: "0011_feature_roadmap.sql", queries: migrationQueries(featureRoadmapMigration) },
 		{ name: "0012_feature_roadmap_refined_catalog.sql", queries: migrationQueries(refinedRoadmapMigration) },
 		{ name: "0013_release_acceptance_status.sql", queries: migrationQueries(releaseAcceptanceMigration) },
+		{ name: "0014_reservation_and_revision_integrity.sql", queries: migrationQueries(reservationAndRevisionMigration) },
 	]);
 	const collaboratorId = crypto.randomUUID(), tokenId = crypto.randomUUID();
 	adminToken = `local-admin-token-${crypto.randomUUID()}`;
@@ -128,7 +130,6 @@ beforeAll(async () => {
 
 describe("RustKore coordinator and stateless MCP", () => {
 	it("rejects repository identity, base repository, and commit SHA mismatches before creating submissions", async () => {
-		const owner = await credential("Repository identity adversary", "collaborator", "repository-identity-adversary");
 		const cases: Array<{ label: string; env?: any; override?: Record<string, unknown>; shaOverride?: string }> = [
 			{ label: "platform repository", override: { base: { repo: { id: 1472413946, full_name: "boscv/RustKore-DEV" } } } },
 			{ label: "wrong repository ID", override: { base: { repo: { id: 1472413946, full_name: "boscv/RustKore" } } } },
@@ -137,8 +138,10 @@ describe("RustKore coordinator and stateless MCP", () => {
 			{ label: "missing repository ID configuration", env: { ...runtimeEnv, GITHUB_REPOSITORY_ID: undefined } },
 			{ label: "nonnumeric repository ID configuration", env: { ...runtimeEnv, GITHUB_REPOSITORY_ID: "rustkore" } },
 			{ label: "divergent head SHA", shaOverride: "a".repeat(40) },
+			{ label: "wrong target branch", override: { base: { ref: "staging", repo: { id: 1472554035, full_name: "boscv/RustKore" } } } },
 		];
 		for (const [index, testCase] of cases.entries()) {
+			const owner = await credential(`Repository identity adversary ${index}`, "collaborator", `repository-identity-adversary-${index}`);
 			const task = await addTask(`Repository identity rejected ${index}`, 50), claim = await tool(owner.token, "claim_task");
 			const sha = (99000 + index).toString(16).padStart(40, "0"), pullNumber = 99000 + index;
 			commitOwners.set(sha, owner.githubUserId); pullHeads.set(pullNumber, sha); pullAuthors.set(pullNumber, owner.githubUserId);
@@ -265,8 +268,16 @@ describe("RustKore coordinator and stateless MCP", () => {
 		const independentReviewer = await credential("OAuth flow reviewer", "reviewer");
 		const reviewed = await tool(independentReviewer.token, "review_task", { submissionId: submitted.output.submissionId, decision: "accepted" });
 		expect(reviewed.output.decision).toBe("accepted");
+		const child = await addTask("Requires actual integration", 1, [integrationTask.id]);
+		expect((await json<any>(await request(`/api/tasks/${child.id}`, "GET"))).state).toBe("blocked");
+		githubPullOverrides = { base: { ref: "staging", repo: { id: 1472554035, full_name: "boscv/RustKore" } } };
+		const wrongBranch = await worker.fetch(new Request(`https://rustkore.test/api/admin/submissions/${submitted.output.submissionId}/integrate`, { method: "POST", headers: { cookie: cookieHeader, origin: "https://rustkore.test", "x-csrf-token": csrf } }), oauthEnv as any);
+		expect(wrongBranch.status).not.toBe(200);
+		expect(await db.prepare("SELECT 1 FROM integrations WHERE submission_id=?").bind(submitted.output.submissionId).first()).toBeNull();
+		githubPullOverrides = {};
 		const integrated = await worker.fetch(new Request(`https://rustkore.test/api/admin/submissions/${submitted.output.submissionId}/integrate`, { method: "POST", headers: { cookie: cookieHeader, origin: "https://rustkore.test", "x-csrf-token": csrf } }), oauthEnv as any);
 		expect(integrated.status).toBe(200);
+		expect((await json<any>(await request(`/api/tasks/${child.id}`, "GET"))).state).toBe("available");
 		const unmergedSha = (75001).toString(16).padStart(40, "0"), unmergedTask = await addTask("Reject an unmerged pull request", 100), unmergedClaim = await tool(issued.token, "claim_task");
 		commitOwners.set(unmergedSha, 75000); pullHeads.set(75001, unmergedSha); pullAuthors.set(75001, 75000);
 		const unmergedSubmission = await tool(issued.token, "submit_task", { taskId: unmergedTask.id, leaseId: unmergedClaim.output.task.leaseId, commitSha: unmergedSha, pullRequestUrl: "https://github.com/boscv/RustKore/pull/75001", summary: "Awaiting a merge" });
@@ -295,6 +306,51 @@ describe("RustKore coordinator and stateless MCP", () => {
 		const revoked = await worker.fetch(new Request(`https://rustkore.test/api/tokens/${issued.tokenId}`, { method: "DELETE", headers: { cookie: cookieHeader, origin: "https://rustkore.test", "x-csrf-token": csrf } }), oauthEnv as any);
 		expect((await json<any>(revoked)).revoked).toBe(true);
 		expect((await rpc(issued.token, "tools/list")).response.status).toBe(401);
+	});
+
+
+	it("makes concurrent repeated claims by the same agent idempotent", async () => {
+		await db.prepare("UPDATE tasks SET status='accepted',assignee_agent_id=NULL,lease_id=NULL,lease_until=NULL WHERE status IN ('open','claimed')").run();
+		const first = await credential("Repeat claim owner", "collaborator", "repeat-claim-owner");
+		const second = await credential("Repeat claim peer", "collaborator", "repeat-claim-peer");
+		const a = await addTask("Repeat claim first", 100), b = await addTask("Repeat claim second", 99);
+		const attempts = await Promise.all(Array.from({ length: 4 }, (_, i) => tool(first.token, "claim_task", {}, i + 1)));
+		expect(attempts.every(result => result.output.task.id === a.id)).toBe(true);
+		expect(new Set(attempts.map(result => result.output.task.leaseId)).size).toBe(1);
+		expect(attempts.filter(result => !result.output.alreadyReserved)).toHaveLength(1);
+		expect((await db.prepare("SELECT COUNT(*) AS n FROM tasks WHERE assignee_agent_id=? AND status='claimed'").bind(first.agentId).first<any>()).n).toBe(1);
+		expect((await db.prepare("SELECT COUNT(*) AS n FROM activity WHERE task_id=? AND action='task.claimed'").bind(a.id).first<any>()).n).toBe(1);
+		expect((await tool(second.token, "claim_task")).output.task.id).toBe(b.id);
+	});
+
+	it("allows a corrected commit in a rejected PR only for the original task", async () => {
+		await db.prepare("UPDATE tasks SET status='accepted',assignee_agent_id=NULL,lease_id=NULL,lease_until=NULL WHERE status IN ('open','claimed')").run();
+		const owner = await credential("Revision owner", "collaborator", "revision-owner");
+		const reviewer = await credential("Revision reviewer", "reviewer");
+		const task = await addTask("Revision original task", 100);
+		const claim = await tool(owner.token, "claim_task");
+		const original = await tool(owner.token, "submit_task", { taskId: task.id, leaseId: claim.output.task.leaseId, commitSha: owner.commitSha, pullRequestUrl: owner.pullRequestUrl, summary: "First revision" });
+		expect(original.body.result.isError).toBeFalsy();
+		expect((await tool(reviewer.token, "review_task", { submissionId: original.output.submissionId, decision: "rejected" })).output.decision).toBe("rejected");
+		const again = await tool(owner.token, "claim_task");
+		expect(again.output.task.id).toBe(task.id);
+		const sameCommit = await tool(owner.token, "submit_task", { taskId: task.id, leaseId: again.output.task.leaseId, commitSha: owner.commitSha, pullRequestUrl: owner.pullRequestUrl, summary: "Same revision" });
+		expect(sameCommit.body.result.isError).toBe(true);
+		const nextSha = crypto.randomUUID().replaceAll("-", "").padEnd(40, "0");
+		commitOwners.set(nextSha, owner.githubUserId); pullHeads.set(owner.githubUserId, nextSha);
+		const corrected = await tool(owner.token, "submit_task", { taskId: task.id, leaseId: again.output.task.leaseId, commitSha: nextSha, pullRequestUrl: owner.pullRequestUrl, summary: "Corrected revision" });
+		expect(corrected.body.result.isError).toBeFalsy();
+		expect((await db.prepare("SELECT status FROM submissions WHERE id=?").bind(original.output.submissionId).first<any>()).status).toBe("rejected");
+		expect((await tool(reviewer.token, "review_task", { submissionId: corrected.output.submissionId, decision: "rejected" })).output.decision).toBe("rejected");
+		const other = await addTask("Revision unrelated task", 100);
+		await db.prepare("UPDATE tasks SET priority=0 WHERE id=?").bind(task.id).run();
+		const otherClaim = await tool(owner.token, "claim_task");
+		expect(otherClaim.output.task.id).toBe(other.id);
+		const thirdSha = crypto.randomUUID().replaceAll("-", "").padEnd(40, "0");
+		commitOwners.set(thirdSha, owner.githubUserId); pullHeads.set(owner.githubUserId, thirdSha);
+		const reused = await tool(owner.token, "submit_task", { taskId: other.id, leaseId: otherClaim.output.task.leaseId, commitSha: thirdSha, pullRequestUrl: owner.pullRequestUrl, summary: "Wrong task" });
+		expect(reused.body.result.isError).toBe(true);
+		expect((await db.prepare("SELECT COUNT(*) AS n FROM submissions WHERE task_id=?").bind(other.id).first<any>()).n).toBe(0);
 	});
 
 	it("rejects pull requests whose head commit differs from the submitted commit", async () => {
@@ -423,7 +479,12 @@ describe("RustKore coordinator and stateless MCP", () => {
 		expect(next.output.tasks.some((item: any) => item.id === child.id)).toBe(true);
 		const claim = await tool(client.token, "claim_task");
 		expect(claim.output.task.id).toBe(parent.id);
-		const blocked = await tool(client.token, "claim_task", { backoffAttempt: 1 });
+		const repeated = await tool(client.token, "claim_task");
+		expect(repeated.output.task.id).toBe(parent.id);
+		expect(repeated.output.task.leaseId).toBe(claim.output.task.leaseId);
+		expect(repeated.output.alreadyReserved).toBe(true);
+		const waiting = await credential("Dependency waiting client", "collaborator", "dependency-waiting-agent");
+		const blocked = await tool(waiting.token, "claim_task", { backoffAttempt: 1 });
 		expect(blocked.output.task).toBeNull();
 		expect(blocked.output.retryAfterSeconds).toBeGreaterThanOrEqual(2);
 		expect(blocked.output.retryAfterSeconds).toBeLessThanOrEqual(3);
