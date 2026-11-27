@@ -54,7 +54,20 @@
 
 <section class="roadmap-section" aria-labelledby="acceptance-title">
  <div class="roadmap-section-heading"><div><p class="section-kicker">05 / RELEASE GATES</p><h2 id="acceptance-title">Release acceptance criteria</h2></div></div>
- <article class="acceptance-panel"><header class="acceptance-heading"><div><h3 id="acceptance-milestone">—</h3><p id="acceptance-objective"></p></div><p id="acceptance-caption">Required scope accumulates from earlier milestones; optional items do not block a release.</p></header><ul id="acceptance-list" class="acceptance-list"></ul></article>
+ <article class="acceptance-panel"><header class="acceptance-heading"><div><h3 id="acceptance-milestone">—</h3><p id="acceptance-objective"></p></div><p id="acceptance-caption">Required scope accumulates from earlier milestones; optional items do not block a release.</p></header><ul id="acceptance-list" class="acceptance-list"></ul>
+  <section id="acceptance-editor" class="acceptance-editor" aria-labelledby="acceptance-editor-title" hidden>
+   <form id="acceptance-editor-form" novalidate>
+    <header class="acceptance-editor-heading"><div><h4 id="acceptance-editor-title">Edit acceptance criterion</h4><p id="acceptance-editor-description"></p></div><button id="acceptance-editor-close" class="acceptance-editor-close" type="button" aria-label="Close editor" title="Close editor"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></header>
+    <div class="acceptance-editor-fields">
+     <label>State<select id="acceptance-editor-state" name="state"><option value="planned">Planned</option><option value="testing">Testing</option><option value="verified">Verified</option></select></label>
+     <label>Public evidence URL<input id="acceptance-editor-evidence" name="evidenceUrl" type="url" maxlength="2048" autocomplete="url"></label>
+     <label class="acceptance-editor-reason">Reason<textarea id="acceptance-editor-reason" name="reason" maxlength="800" rows="4" required></textarea></label>
+    </div>
+    <p id="acceptance-editor-error" class="roadmap-form-error" role="alert" hidden></p>
+    <footer class="acceptance-editor-actions"><button id="acceptance-editor-cancel" class="button button-quiet" type="button">Cancel</button><button id="acceptance-editor-save" class="button" type="submit">Save changes</button></footer>
+   </form>
+  </section>
+ </article>
 </section>
 </main>
 <footer class="site-footer"><a class="brand" href="/"><span class="brand-mark" aria-hidden="true">RK</span><span>RustKore</span></a><span>Built together. Engineered for the future.</span><div><a href="https://github.com/boscv/RustKore" target="_blank" rel="noreferrer"><strong>RustKore</strong><span>Open-source Rust software ↗</span></a><a href="https://github.com/boscv/RustKore-DEV" target="_blank" rel="noreferrer"><strong>RustKore-DEV</strong><span>Collaboration platform ↗</span></a></div></footer>

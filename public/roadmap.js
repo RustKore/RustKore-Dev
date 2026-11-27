@@ -1,10 +1,10 @@
-import { ALPHA_FLOW_NODES, ALPHA_FLOW_PATHS, ROADMAP_STATES, alphaReadiness, buildDonutSegments, buildIsometricMilestones, deriveStateCounts, verifiedPercentage } from "/roadmap-visual.js";
+import { ALPHA_FLOW_NODES, ALPHA_FLOW_PATHS, ROADMAP_STATES, alphaReadiness, buildDonutSegments, buildIsometricMilestones, deriveStateCounts, validateAcceptanceEdit, verifiedPercentage } from "/roadmap-visual.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const $ = (selector) => document.querySelector(selector);
 const stateName = { planned: "Planned", developing: "Developing", testing: "Testing", verified: "Verified" };
 const stateOrder = ["planned", "developing", "testing", "verified"];
-let roadmap = null, categories = [], featureCursor = null, expandedCell = null, expandedFeatures = [], isAdmin = false, csrf = "", historyCursor = null;
+let roadmap = null, categories = [], featureCursor = null, expandedCell = null, expandedFeatures = [], isAdmin = false, csrf = "", historyCursor = null, activeAcceptanceCriterion = null, acceptanceBaseline = null;
 const query = new URLSearchParams(location.search), localHost = ["localhost", "127.0.0.1", "::1"].includes(location.hostname);
 let scenario = localHost && query.get("scenario") === "demo" ? "demo" : "actual";
 
@@ -97,6 +97,8 @@ function renderMilestones() {
 		const legend = node("span", "milestone-legend", milestone.id === "alpha" ? "First usable release" : milestone.id === "stable" ? "Stable release" : "");
 		details.append(legend); button.append(marker, details);
 		button.addEventListener("click", () => {
+			if (index !== (window.selectedMilestoneIndex || 0) && activeAcceptanceCriterion && acceptanceEditorChanged() && !window.confirm("Discard your unsaved changes to this acceptance criterion?")) return;
+			if (index !== (window.selectedMilestoneIndex || 0)) closeAcceptanceEditor();
 			window.selectedMilestoneIndex = index;
 			renderMilestones(); renderAcceptance(); renderTable();
 			const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
@@ -179,6 +181,46 @@ function stateIcon(state) {
 
 function selectedMilestoneId() { return roadmap.milestones[window.selectedMilestoneIndex || 0]?.id; }
 
+function isPublicHttpsUrl(value) {
+	if (!value) return false;
+	try {
+		const url = new URL(value);
+		return url.protocol === "https:" && !url.username && !url.password && url.hostname.includes(".") && url.hostname !== "localhost" && !url.hostname.endsWith(".localhost") && !url.hostname.endsWith(".local") && !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(url.hostname) && !url.hostname.startsWith("[");
+	} catch { return false; }
+}
+
+function acceptanceEditorChanged() {
+	if (!acceptanceBaseline) return false;
+	return $("#acceptance-editor-state").value !== acceptanceBaseline.state
+		|| $("#acceptance-editor-evidence").value !== acceptanceBaseline.evidenceUrl
+		|| $("#acceptance-editor-reason").value !== acceptanceBaseline.reason;
+}
+
+function closeAcceptanceEditor() {
+	activeAcceptanceCriterion = null; acceptanceBaseline = null;
+	const editor = $("#acceptance-editor"); editor.hidden = true; editor.removeAttribute("aria-busy");
+	$("#acceptance-editor-form").reset(); $("#acceptance-editor-error").hidden = true; $("#acceptance-editor-error").textContent = "";
+}
+
+function openAcceptanceEditor(criterion) {
+	if (activeAcceptanceCriterion?.id === criterion.id) { $("#acceptance-editor-state").focus({ preventScroll: true }); return; }
+	if (activeAcceptanceCriterion && acceptanceEditorChanged() && !window.confirm("Discard your unsaved changes to this acceptance criterion?")) return;
+	activeAcceptanceCriterion = criterion;
+	$("#acceptance-editor-description").textContent = criterion.description;
+	$("#acceptance-editor-state").value = criterion.state || "planned";
+	$("#acceptance-editor-evidence").value = criterion.evidenceUrl || "";
+	$("#acceptance-editor-reason").value = "";
+	acceptanceBaseline = { state: criterion.state || "planned", evidenceUrl: criterion.evidenceUrl || "", reason: "" };
+	$("#acceptance-editor-error").hidden = true; $("#acceptance-editor-error").textContent = ""; $("#acceptance-editor").hidden = false;
+	$("#acceptance-editor-state").focus({ preventScroll: true });
+}
+
+function renderAcceptanceEditor(criteria) {
+	const editor = $("#acceptance-editor");
+	if (!isAdmin || scenario !== "actual" || !activeAcceptanceCriterion || !criteria.some((item) => item.id === activeAcceptanceCriterion.id)) { closeAcceptanceEditor(); return; }
+	editor.hidden = false;
+}
+
 function renderTable() {
 	const tbody = $("#coverage-body"), selectedCategory = $("#filter-category").value, selectedMilestone = $("#filter-milestone").value, selectedState = $("#filter-state").value, cells = coverageMap(), selectedId = selectedMilestoneId();
 	tbody.replaceChildren();
@@ -241,16 +283,34 @@ function renderFeature(feature) {
 }
 
 function renderAdminControls(feature) {
-	const box = node("div", "feature-admin-controls"), stateLabel = node("label", "", "State"), select = document.createElement("select");
-	stateOrder.forEach((state) => select.append(new Option(stateName[state], state))); select.value = feature.state; stateLabel.append(select);
-	const reasonLabel = node("label", "", "Change reason"), reason = document.createElement("input"); reason.maxLength = 800; reason.placeholder = "Reason (at least 8 characters)"; reasonLabel.append(reason);
-	const save = node("button", "button button-small", "Save state"); save.type = "button"; save.addEventListener("click", async () => { try { await request(`/api/admin/roadmap/features/${encodeURIComponent(feature.id)}`, { method: "PATCH", body: JSON.stringify({ state: select.value, reason: reason.value }) }); notice("Feature state updated."); await refresh(); } catch (error) { notice(error.message); } }); box.append(stateLabel, reasonLabel, save);
-	const urlLabel = node("label", "wide", "Validation evidence URL"), url = document.createElement("input"); url.type = "url"; url.placeholder = "https://…"; urlLabel.append(url);
-	const evidenceLabel = node("label", "", "Evidence label"), evidenceTitle = document.createElement("input"); evidenceTitle.maxLength = 160; evidenceLabel.append(evidenceTitle);
-	const descriptionLabel = node("label", "", "Description"), description = document.createElement("input"); description.maxLength = 800; descriptionLabel.append(description);
-	const addEvidence = node("button", "button button-small", "Add evidence"); addEvidence.type = "button"; addEvidence.addEventListener("click", async () => { try { await request(`/api/admin/roadmap/features/${encodeURIComponent(feature.id)}/evidence`, { method: "POST", body: JSON.stringify({ url: url.value, label: evidenceTitle.value, description: description.value }) }); notice("Evidence added."); await refresh(); } catch (error) { notice(error.message); } }); box.append(urlLabel, evidenceLabel, descriptionLabel, addEvidence);
-	const taskLabel = node("label", "", "Link task ID"), task = document.createElement("input"); task.maxLength = 100; task.placeholder = "Existing task ID"; taskLabel.append(task);
-	const link = node("button", "button button-small", "Link task"); link.type = "button"; link.addEventListener("click", async () => { try { await request(`/api/admin/roadmap/features/${encodeURIComponent(feature.id)}/tasks`, { method: "POST", body: JSON.stringify({ taskId: task.value }) }); notice("Task linked."); await refresh(); } catch (error) { notice(error.message); } }); box.append(taskLabel, link); return box;
+	const box = node("div", "feature-admin-controls");
+	const bindAdminForm = (form, button, action) => { form.noValidate = true; form.addEventListener("input", (event) => event.target.removeAttribute("aria-invalid")); form.addEventListener("submit", async (event) => {
+		event.preventDefault(); const errorSlot = form.querySelector("[role=alert]"); errorSlot.hidden = true; errorSlot.textContent = ""; button.disabled = true; form.setAttribute("aria-busy", "true");
+		try {
+			if (!form.checkValidity()) {
+				const invalid = [...form.elements].find((field) => field.willValidate && !field.checkValidity());
+				if (invalid) { invalid.setAttribute("aria-invalid", "true"); invalid.focus(); }
+				throw new Error("Complete the required fields with valid values.");
+			}
+			await action(); await refresh();
+		}
+		catch (error) { errorSlot.textContent = error.message; errorSlot.hidden = false; }
+		finally { button.disabled = false; form.removeAttribute("aria-busy"); }
+	}); };
+	const stateForm = node("form", "roadmap-admin-form feature-state-form"), stateLabel = node("label", "", "State"), select = document.createElement("select");
+	select.name = "state"; stateOrder.forEach((state) => select.append(new Option(stateName[state], state))); select.value = feature.state; stateLabel.append(select);
+	const reasonLabel = node("label", "", "Change reason"), reason = document.createElement("input"); reason.name = "reason"; reason.maxLength = 800; reason.minLength = 8; reason.required = true; reason.placeholder = "At least 8 characters"; reasonLabel.append(reason);
+	const save = node("button", "button", "Save state"); save.type = "submit"; const stateError = node("p", "roadmap-form-error"); stateError.setAttribute("role", "alert"); stateError.hidden = true;
+	stateForm.append(stateLabel, reasonLabel, save, stateError); bindAdminForm(stateForm, save, async () => { if (reason.value.trim().length < 8) throw new Error("Provide a change reason of at least 8 characters."); await request(`/api/admin/roadmap/features/${encodeURIComponent(feature.id)}`, { method: "PATCH", body: JSON.stringify({ state: select.value, reason: reason.value }) }); notice("Feature state updated."); });
+	const evidenceForm = node("form", "roadmap-admin-form feature-evidence-form"), urlLabel = node("label", "", "Validation evidence URL"), url = document.createElement("input"); url.type = "url"; url.name = "url"; url.maxLength = 2048; url.required = true; url.placeholder = "https://…"; urlLabel.append(url);
+	const evidenceLabel = node("label", "", "Evidence label"), evidenceTitle = document.createElement("input"); evidenceTitle.name = "label"; evidenceTitle.maxLength = 160; evidenceTitle.required = true; evidenceLabel.append(evidenceTitle);
+	const descriptionLabel = node("label", "", "Description"), description = document.createElement("input"); description.name = "description"; description.maxLength = 800; description.required = true; descriptionLabel.append(description);
+	const addEvidence = node("button", "button button-quiet", "Add evidence"); addEvidence.type = "submit"; const evidenceError = node("p", "roadmap-form-error"); evidenceError.setAttribute("role", "alert"); evidenceError.hidden = true;
+	evidenceForm.append(urlLabel, evidenceLabel, descriptionLabel, addEvidence, evidenceError); bindAdminForm(evidenceForm, addEvidence, async () => { if (!isPublicHttpsUrl(url.value)) throw new Error("Evidence URL must use a public HTTPS hostname without embedded credentials."); await request(`/api/admin/roadmap/features/${encodeURIComponent(feature.id)}/evidence`, { method: "POST", body: JSON.stringify({ url: url.value, label: evidenceTitle.value, description: description.value }) }); notice("Evidence added."); });
+	const taskForm = node("form", "roadmap-admin-form feature-task-form"), taskLabel = node("label", "", "Link task ID"), task = document.createElement("input"); task.name = "taskId"; task.maxLength = 100; task.required = true; task.placeholder = "Existing task ID"; taskLabel.append(task);
+	const link = node("button", "button button-quiet", "Link task"); link.type = "submit"; const taskError = node("p", "roadmap-form-error"); taskError.setAttribute("role", "alert"); taskError.hidden = true;
+	taskForm.append(taskLabel, link, taskError); bindAdminForm(taskForm, link, async () => { await request(`/api/admin/roadmap/features/${encodeURIComponent(feature.id)}/tasks`, { method: "POST", body: JSON.stringify({ taskId: task.value }) }); notice("Task linked."); });
+	box.append(stateForm, evidenceForm, taskForm); return box;
 }
 
 async function loadFeatures(next) {
@@ -267,23 +327,38 @@ function renderAcceptance() {
 	$("#acceptance-objective").textContent = selected.objective;
 	$("#acceptance-caption").textContent = "Required scope accumulates from earlier milestones; optional items do not block a release.";
 	const criteria = selected.acceptanceCriteria || [];
-	if (!criteria.length) { const empty = node("li", "acceptance-empty", "No release acceptance checklist is defined for this milestone yet."); list.append(empty); return; }
+	if (!criteria.length) { closeAcceptanceEditor(); const empty = node("li", "acceptance-empty", "No release acceptance checklist is defined for this milestone yet."); list.append(empty); return; }
 	criteria.forEach((criterion) => {
-		const item = node("li", "acceptance-item"), state = criterion.state || "planned";
-		item.append(stateIcon(state), node("span", "", criterion.description), node("span", "acceptance-state", stateName[state] || "Planned"));
+		const item = node("li", `acceptance-item${isAdmin && scenario === "actual" ? " acceptance-item-admin" : ""}`), state = criterion.state || "planned";
+		item.append(stateIcon(state), node("span", "acceptance-description", criterion.description), node("span", "acceptance-state", stateName[state] || "Planned"));
 		if (isAdmin && scenario === "actual") {
-			const controls = node("div", "roadmap-admin-controls"), statusLabel = node("label", "", "State"), status = node("select");
-			status.setAttribute("aria-label", `State for ${criterion.id}`);
-			["planned", "testing", "verified"].forEach((value) => { const option = node("option", "", stateName[value]); option.value = value; status.append(option); }); status.value = state;
-			statusLabel.append(status);
-			const evidenceLabel = node("label", "", "Public evidence URL"), evidence = node("input"); evidence.type = "url"; evidence.maxLength = 2048; evidence.value = criterion.evidenceUrl || ""; evidenceLabel.append(evidence);
-			const reasonLabel = node("label", "", "Reason"), reason = node("input"); reason.maxLength = 800; reasonLabel.append(reason);
-			const save = node("button", "button button-small", "Save acceptance status"); save.type = "button";
-			save.addEventListener("click", async () => { try { await request(`/api/admin/roadmap/acceptance/${encodeURIComponent(criterion.id)}`, { method: "PATCH", body: JSON.stringify({ state: status.value, evidenceUrl: evidence.value, reason: reason.value }) }); notice("Release acceptance status updated."); await refresh(); } catch (error) { notice(error.message); } });
-			controls.append(statusLabel, evidenceLabel, reasonLabel, save); item.append(controls);
+			const edit = node("button", "acceptance-edit", ""); edit.type = "button"; edit.title = "Edit acceptance criterion"; edit.setAttribute("aria-label", "Edit acceptance criterion");
+			const pencil = svgElement("svg", { viewBox: "0 0 24 24", width: 16, height: 16, "aria-hidden": "true", focusable: "false" }); pencil.append(svgElement("path", { d: "M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z" })); edit.append(pencil);
+			edit.addEventListener("click", () => openAcceptanceEditor(criterion)); item.append(edit);
 		}
 		list.append(item);
 	});
+	renderAcceptanceEditor(criteria);
+}
+
+function submitAcceptanceEditor(event) {
+	event.preventDefault();
+	if (!activeAcceptanceCriterion) return;
+	const state = $("#acceptance-editor-state").value, evidenceUrl = $("#acceptance-editor-evidence").value.trim(), reason = $("#acceptance-editor-reason").value;
+	const error = $("#acceptance-editor-error"), save = $("#acceptance-editor-save"), editor = $("#acceptance-editor");
+	const showError = (message, field) => { error.textContent = message; error.hidden = false; if (field) { field.setAttribute("aria-invalid", "true"); field.focus(); } };
+	error.textContent = ""; error.hidden = true;
+	const validationMessage = validateAcceptanceEdit({ state, evidenceUrl, reason, currentState: activeAcceptanceCriterion.state || "planned" });
+	if (validationMessage) {
+		const invalidField = validationMessage.includes("reason") ? $("#acceptance-editor-reason") : validationMessage.includes("evidence") ? $("#acceptance-editor-evidence") : $("#acceptance-editor-state");
+		showError(validationMessage, invalidField); return;
+	}
+	["#acceptance-editor-state", "#acceptance-editor-evidence", "#acceptance-editor-reason"].forEach((selector) => $(selector).removeAttribute("aria-invalid"));
+	save.disabled = true; editor.setAttribute("aria-busy", "true");
+	request(`/api/admin/roadmap/acceptance/${encodeURIComponent(activeAcceptanceCriterion.id)}`, { method: "PATCH", body: JSON.stringify({ state, evidenceUrl, reason }) })
+		.then(async () => { closeAcceptanceEditor(); try { await refresh(); notice("Release acceptance status updated."); } catch (refreshError) { notice(`Saved, but the Roadmap could not refresh: ${refreshError.message}`); } })
+		.catch((requestError) => { showError(requestError.message); })
+		.finally(() => { save.disabled = false; editor.removeAttribute("aria-busy"); });
 }
 
 function renderHistory(items, append = false) {
@@ -314,6 +389,11 @@ async function init() {
 		window.selectedMilestoneIndex = Math.max(0, roadmap.milestones.findIndex((milestone) => milestone.status === "planned"));
 		updateFilterOptions(); renderHeroContent(); renderMilestones(); renderAcceptance(); renderTable();
 		["#filter-category", "#filter-milestone", "#filter-state"].forEach((selector) => $(selector).addEventListener("change", () => { expandedCell = null; expandedFeatures = []; featureCursor = null; renderTable(); }));
+		$("#acceptance-editor-close").addEventListener("click", closeAcceptanceEditor);
+		$("#acceptance-editor-cancel").addEventListener("click", closeAcceptanceEditor);
+		$("#acceptance-editor-form").noValidate = true;
+		$("#acceptance-editor-form").addEventListener("input", (event) => event.target.removeAttribute("aria-invalid"));
+		$("#acceptance-editor-form").addEventListener("submit", submitAcceptanceEditor);
 		$("#clear-roadmap-filters").addEventListener("click", () => { ["#filter-category", "#filter-milestone", "#filter-state"].forEach((selector) => { $(selector).value = ""; }); expandedCell = null; expandedFeatures = []; featureCursor = null; renderTable(); });
 		$("#load-roadmap-history").addEventListener("click", () => loadHistory(false)); $("#roadmap-history-more").addEventListener("click", () => loadHistory(true));
 	} catch (error) {

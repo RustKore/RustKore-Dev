@@ -31,6 +31,20 @@ export function alphaReadiness(milestones = []) {
 	return alpha ? { verified: Number(alpha.readiness?.verified ?? 0), total: Number(alpha.readiness?.total ?? 0) } : { verified: 0, total: 0 };
 }
 
+export function validateAcceptanceEdit({ state, evidenceUrl, reason, currentState }) {
+	if (!["planned", "testing", "verified"].includes(state)) return "Choose Planned, Testing, or Verified.";
+	if (typeof reason !== "string" || reason.trim().length < 8 || reason.length > 800) return "Provide a reason between 8 and 800 characters.";
+	if (currentState === "verified" && state === "planned") return "Move this criterion to Testing before returning it to Planned.";
+	if (state === "verified") {
+		if (typeof evidenceUrl !== "string" || evidenceUrl.length > 2048) return "Evidence URL must be at most 2048 characters.";
+		try {
+			const url = new URL(evidenceUrl);
+			if (url.protocol !== "https:" || url.username || url.password || !url.hostname.includes(".") || url.hostname === "localhost" || url.hostname.endsWith(".localhost") || url.hostname.endsWith(".local") || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(url.hostname) || url.hostname.startsWith("[")) throw new Error();
+		} catch { return "Verified criteria require public HTTPS evidence without embedded credentials."; }
+	}
+	return "";
+}
+
 export const ALPHA_FLOW_NODES = [
 	{ id: "connect", label: "Connect", x: 10, y: 16, icon: "network" },
 	{ id: "navigate", label: "Navigate", x: 130, y: 16, icon: "route" },

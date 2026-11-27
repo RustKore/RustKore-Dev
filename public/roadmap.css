@@ -125,11 +125,17 @@
 .feature-item>strong,.feature-tasks>strong,.feature-evidence>strong{display:block;margin-top:12px;color:var(--text);font-size:12px;font-weight:600}
 .feature-item ul{margin:6px 0 0;padding-left:18px;color:var(--muted);font-size:12px;line-height:1.55;overflow-wrap:anywhere}
 .feature-evidence a,.feature-tasks a{color:var(--accent-soft)}
-.feature-admin-controls{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
-.feature-admin-controls label{display:grid;min-width:0;gap:5px;color:var(--muted);font-size:12px}
-.feature-admin-controls input,.feature-admin-controls select,.feature-admin-controls textarea{width:100%;min-width:0;min-height:42px;padding:8px;border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--bg);color:var(--text);font:inherit}
-.feature-admin-controls textarea{min-height:54px}
-.feature-admin-controls .wide{grid-column:1/-1}
+.feature-admin-controls{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:14px;padding-top:16px;border-top:1px solid var(--line)}
+.roadmap-admin-form{display:grid;align-content:start;gap:12px;min-width:0}
+.roadmap-admin-form label,.acceptance-editor-fields label{display:grid;min-width:0;gap:8px;color:var(--muted);font-size:13px;line-height:1.4}
+.roadmap-admin-form input,.roadmap-admin-form select,.roadmap-admin-form textarea,.acceptance-editor-fields input,.acceptance-editor-fields select,.acceptance-editor-fields textarea{width:100%;min-width:0;min-height:44px;padding:9px 12px;border:1px solid var(--line-strong);border-radius:var(--radius);background-color:var(--surface);color:var(--text);font-size:14px;line-height:1.4}
+.roadmap-admin-form select,.acceptance-editor-fields select{appearance:none;-webkit-appearance:none;padding-right:36px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 9 L12 15 L18 9' fill='none' stroke='%23aeb3ba' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-position:right 12px center;background-repeat:no-repeat;background-size:16px 16px}
+.roadmap-admin-form textarea,.acceptance-editor-fields textarea{min-height:96px;resize:vertical}
+.roadmap-admin-form .button,.acceptance-editor-actions .button{width:fit-content;min-height:44px;white-space:nowrap;font-size:14px;font-weight:600}
+.roadmap-form-error{grid-column:1/-1;margin:0;color:var(--danger);font-size:13px;line-height:1.45;overflow-wrap:anywhere}
+.roadmap-admin-form [aria-invalid="true"],.acceptance-editor-fields [aria-invalid="true"]{border-color:var(--danger)}
+.roadmap-admin-form:focus-within,.acceptance-editor:focus-within{min-width:0}
+.roadmap-admin-form button:disabled{cursor:wait;opacity:.58}
 .roadmap-note{margin:10px 0;color:var(--muted);font-size:12px}
 .roadmap-pagination{display:flex;justify-content:center;margin-top:12px}
 .roadmap-admin{margin-top:28px;padding:20px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}
@@ -152,10 +158,28 @@
 #acceptance-caption{max-width:480px;margin:0;color:var(--dim);text-align:right}
 .acceptance-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 28px;margin:0;padding:0;list-style:none}
 .acceptance-item{display:grid;grid-template-columns:16px minmax(0,1fr) auto;align-items:start;gap:10px;padding:13px 0;border-bottom:1px solid var(--line);color:var(--text);font-size:13px;line-height:1.5}
+.acceptance-item-admin{grid-template-columns:16px minmax(0,1fr) auto 28px;align-items:center;min-height:48px;padding:8px 0}
 .acceptance-item:last-child,.acceptance-item:nth-last-child(2):nth-child(odd){border-bottom:0}
 .acceptance-item .state-icon{margin-top:1px}
+.acceptance-item-admin .state-icon{margin:0}
+.acceptance-description{min-width:0;overflow-wrap:anywhere}
 .acceptance-state{color:var(--dim);font-size:11px;white-space:nowrap}
+.acceptance-edit,.acceptance-editor-close{display:grid;width:28px;height:28px;place-items:center;padding:0;border:0;border-radius:var(--radius);background:transparent;color:var(--dim);cursor:pointer}
+.acceptance-edit svg,.acceptance-editor-close svg{display:block;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.acceptance-edit:hover,.acceptance-editor-close:hover{background:var(--elevated);color:var(--text)}
 .acceptance-empty{grid-column:1/-1;padding:16px 0;color:var(--muted);font-size:13px}
+.acceptance-editor{margin-top:24px;padding:24px;border:1px solid var(--line);border-radius:var(--radius);background:var(--elevated)}
+.acceptance-editor form{display:grid;gap:16px;min-width:0}
+.acceptance-editor-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.acceptance-editor-heading h4{margin:0;color:var(--text);font-size:16px;font-weight:600;line-height:1.4}
+.acceptance-editor-heading p{margin:8px 0 0;color:var(--muted);font-size:13px;line-height:1.5}
+.acceptance-editor-close{flex:0 0 28px;margin:-4px -4px 0 0}
+.acceptance-editor-fields{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,3fr);gap:16px}
+.acceptance-editor-fields .acceptance-editor-reason{grid-column:1/-1}
+.acceptance-editor-actions{display:flex;justify-content:flex-end;gap:12px}
+.acceptance-editor-actions .button{padding:0 16px}
+.acceptance-editor-actions .button-quiet{border:1px solid var(--line-strong);background:transparent}
+.acceptance-editor[aria-busy="true"]{opacity:.8}
 
 @media(max-width:1023px){
  .roadmap-hero{padding:24px}
@@ -212,6 +236,11 @@
  .acceptance-heading{display:block}
  #acceptance-caption{margin-top:8px;text-align:left}
  .acceptance-list{grid-template-columns:1fr}
+ .acceptance-editor{padding:16px}
+ .acceptance-editor-fields{grid-template-columns:minmax(0,1fr)}
+ .acceptance-editor-fields .acceptance-editor-reason{grid-column:auto}
+ .acceptance-editor-actions{justify-content:stretch}
+ .acceptance-editor-actions .button{flex:1}
  .acceptance-item:last-child,.acceptance-item:nth-last-child(2):nth-child(odd){border-bottom:1px solid var(--line)}
  .acceptance-item:last-child{border-bottom:0}
  .roadmap-scenario-switch{margin:0}

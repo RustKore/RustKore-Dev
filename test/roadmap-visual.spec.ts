@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ALPHA_FLOW_NODES, ALPHA_FLOW_PATHS, alphaReadiness, buildDonutSegments, buildIsometricMilestones, deriveStateCounts, parseOrthogonalPath, projectIsometric, verifiedPercentage } from "../public/roadmap-visual.js";
+import { ALPHA_FLOW_NODES, ALPHA_FLOW_PATHS, alphaReadiness, buildDonutSegments, buildIsometricMilestones, deriveStateCounts, parseOrthogonalPath, projectIsometric, validateAcceptanceEdit, verifiedPercentage } from "../public/roadmap-visual.js";
 
 describe("Feature Roadmap visual data", () => {
 	it("derives donut counts and verified coverage from the live category-by-milestone data", () => {
@@ -27,6 +27,20 @@ describe("Feature Roadmap visual data", () => {
 	it("uses the cumulative Alpha release readiness record", () => {
 		expect(alphaReadiness([{ id: "prototype", readiness: { verified: 1, total: 5 } }, { id: "alpha", readiness: { verified: 4, total: 16 } }])).toEqual({ verified: 4, total: 16 });
 		expect(alphaReadiness([])).toEqual({ verified: 0, total: 0 });
+	});
+
+	it("validates release acceptance edits according to the existing API rules", () => {
+		const common = { state: "testing", evidenceUrl: "https://example.org/proof", reason: "A sufficiently detailed reason", currentState: "planned" };
+		expect(validateAcceptanceEdit(common)).toBe("");
+		expect(validateAcceptanceEdit({ ...common, reason: "short" })).toMatch(/8 and 800/);
+		expect(validateAcceptanceEdit({ ...common, reason: "r".repeat(801) })).toMatch(/8 and 800/);
+		expect(validateAcceptanceEdit({ ...common, state: "unknown" })).toMatch(/Choose Planned/);
+		expect(validateAcceptanceEdit({ ...common, currentState: "verified", state: "planned" })).toMatch(/Testing before/);
+		expect(validateAcceptanceEdit({ ...common, state: "verified", evidenceUrl: "" })).toMatch(/public HTTPS/);
+		expect(validateAcceptanceEdit({ ...common, state: "verified", evidenceUrl: "http://example.org/proof" })).toMatch(/public HTTPS/);
+		expect(validateAcceptanceEdit({ ...common, state: "verified", evidenceUrl: "https://user:pass@example.org/proof" })).toMatch(/public HTTPS/);
+		expect(validateAcceptanceEdit({ ...common, state: "verified", evidenceUrl: "https://localhost/proof" })).toMatch(/public HTTPS/);
+		expect(validateAcceptanceEdit({ ...common, state: "verified", evidenceUrl: "https://example.org/" + "a".repeat(2050) })).toMatch(/2048 characters/);
 	});
 
 	it("projects all six isometric platforms from the same axes and keeps them inside the viewBox", () => {
