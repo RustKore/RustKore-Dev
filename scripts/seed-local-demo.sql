@@ -303,11 +303,11 @@ SELECT printf('demo-task-%03d',x),printf('Sample %s contribution %02d',CASE x%5 
  CASE x%4 WHEN 0 THEN 'small' WHEN 1 THEN 'medium' WHEN 2 THEN 'large' ELSE 'extra_large' END,unixepoch()-((x-80)*7200),unixepoch()-((x-80)*7200) FROM n;
 WITH RECURSIVE n(x) AS (SELECT 91 UNION ALL SELECT x+1 FROM n WHERE x<95)
 INSERT OR IGNORE INTO submissions (id,task_id,agent_id,commit_sha,pull_request_url,summary,status,created_at,submitted_github_user_id,submitted_github_login)
-SELECT printf('demo-submission-%03d',x),printf('demo-task-%03d',x),printf('demo-agent-%02d',1+((x-81)%15)),printf('%040x',x+1000000),printf('https://github.com/boscv/RustKore/pull/%d',90000+x),'Synthetic local preview submission.',CASE WHEN x>=94 THEN 'accepted' ELSE 'pending' END,
+SELECT printf('demo-submission-%03d',x),printf('demo-task-%03d',x),printf('demo-agent-%02d',1+((x-81)%15)),printf('%040x',x+1000000),printf('https://github.com/RustKore/RustKore/pull/%d',90000+x),'Synthetic local preview submission.',CASE WHEN x>=94 THEN 'accepted' ELSE 'pending' END,
  unixepoch()-((95-x)*1800),990000001+((x-81)%15),printf('demo-contributor-%02d',1+((x-81)%15)) FROM n
 WHERE NOT EXISTS (SELECT 1 FROM submissions s WHERE s.id=printf('demo-submission-%03d',x))
 AND NOT EXISTS (SELECT 1 FROM submissions s WHERE lower(s.commit_sha)=lower(printf('%040x',x+1000000)));
-UPDATE submissions SET pull_request_url='https://github.com/boscv/RustKore/pull/' || (90000 + CAST(substr(id,17,3) AS INTEGER)) WHERE id LIKE 'demo-submission-09%' AND pull_request_url IS NULL;
+UPDATE submissions SET pull_request_url='https://github.com/RustKore/RustKore/pull/' || (90000 + CAST(substr(id,17,3) AS INTEGER)) WHERE id LIKE 'demo-submission-09%' AND pull_request_url IS NULL;
 INSERT OR IGNORE INTO reviews (id,submission_id,reviewer_id,decision,comment,created_at)
 SELECT printf('demo-review-%03d',x),printf('demo-submission-%03d',x),'demo-contributor-12','accepted','Synthetic local preview review.',unixepoch()-((95-x)*1200) FROM (SELECT 94 AS x UNION ALL SELECT 95);
 UPDATE tasks SET status='claimed',assignee_agent_id='demo-agent-01',lease_id='demo-lease-001',lease_until=unixepoch()+4200,updated_at=unixepoch()-7200 WHERE id='demo-task-081';

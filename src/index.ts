@@ -1,16 +1,21 @@
 type Role = "admin" | "collaborator" | "reviewer";
-type Env = { rustkore_db: D1Database; ASSETS?: { fetch(request: Request): Promise<Response> }; API_RATE_LIMITER?: { limit(input: { key: string }): Promise<{ success: boolean }> }; GITHUB_REPOSITORY?: string; GITHUB_REPOSITORY_ID?: string; GITHUB_API_TOKEN?: string; GITHUB_OAUTH_CLIENT_ID?: string; GITHUB_OAUTH_CLIENT_SECRET?: string; GITHUB_OAUTH_CALLBACK_URL?: string; RUSTKORE_ADMIN_GITHUB_IDS?: string; RUSTKORE_REVIEWER_GITHUB_IDS?: string; github_api?: { fetch(request: Request): Promise<Response> }; HEARTBEAT_INTERVAL_SECONDS?: string; LEASE_DURATION_SECONDS?: string };
-type Identity = { id: string; role: Role; collaboratorId: string; agentId: string | null; name: string; githubUserId: number | null; githubLogin: string | null };
-type WebIdentity = { collaboratorId: string; githubUserId: number; githubLogin: string; name: string; avatarUrl: string | null; reviewerEnabled: boolean; isAdmin: boolean };
+type CredentialScope = "collaborate" | "review" | "maintain" | "release" | "admin";
+type Capability = CredentialScope;
+type OrganizationPermissions = { capabilities: Capability[]; teams: string[]; expiresAt: number };
+type Env = { rustkore_db: D1Database; ASSETS?: { fetch(request: Request): Promise<Response> }; API_RATE_LIMITER?: { limit(input: { key: string }): Promise<{ success: boolean }> }; GITHUB_REPOSITORY?: string; GITHUB_REPOSITORY_ID?: string; GITHUB_API_TOKEN?: string; GITHUB_OAUTH_CLIENT_ID?: string; GITHUB_OAUTH_CLIENT_SECRET?: string; GITHUB_OAUTH_CALLBACK_URL?: string; github_api?: { fetch(request: Request): Promise<Response> }; HEARTBEAT_INTERVAL_SECONDS?: string; LEASE_DURATION_SECONDS?: string };
+type Identity = { id: string; role: Role; credentialScope: CredentialScope; collaboratorId: string; agentId: string | null; name: string; githubUserId: number; githubLogin: string };
+type WebIdentity = { collaboratorId: string; githubUserId: number; githubLogin: string; name: string; avatarUrl: string | null };
 
 const DEFAULT_HEARTBEAT_SECONDS = 120;
 const DEFAULT_LEASE_SECONDS = 600;
 const LEGACY_PROTOCOLS = ["2025-11-25", "2025-06-18", "2025-03-26"];
 const MODERN_PROTOCOL = "2026-07-28";
+const legacyPlatformOrigin = "https://rustkore.boscv.workers.dev";
 const rateWindows = new Map<string, { start: number; count: number }>();
 let cachedContext: { content: string; updatedAt: number; expires: number } | null = null;
 let cachedDashboard: { content: any; expires: number } | null = null;
 let cachedRoadmap: { content: any; expires: number } | null = null;
+const organizationPermissionCache = new Map<number, OrganizationPermissions>();
 
 const json = (body: unknown, status = 200, extraHeaders?: HeadersInit) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8", ...Object.fromEntries(new Headers(extraHeaders).entries()) } });
 const id = () => crypto.randomUUID();
@@ -46,26 +51,26 @@ async function authenticate(request: Request, env: Env): Promise<Identity | null
 	const token = authHeader(request);
 	if (!token) return null;
 	const hash = await sha256(token);
-	const identity = await env.rustkore_db.prepare(`SELECT t.id, t.role, t.collaborator_id AS collaboratorId, t.agent_id AS agentId,
-		COALESCE(a.name, c.name) AS name,c.github_user_id AS githubUserId,c.github_login AS githubLogin,c.reviewer_enabled AS reviewerEnabled FROM tokens t JOIN collaborators c ON c.id=t.collaborator_id
+	const identity = await env.rustkore_db.prepare(`SELECT t.id, t.role,t.credential_scope AS credentialScope,t.collaborator_id AS collaboratorId, t.agent_id AS agentId,
+		COALESCE(a.name, c.name) AS name,c.github_user_id AS githubUserId,c.github_login AS githubLogin FROM tokens t JOIN collaborators c ON c.id=t.collaborator_id
 		LEFT JOIN agents a ON a.id=t.agent_id WHERE t.token_hash=? AND t.revoked_at IS NULL AND c.suspended_at IS NULL`)
-		.bind(hash).first<Identity & { reviewerEnabled: number }>();
+		.bind(hash).first<Identity>();
 	if (!identity) return null;
-	const githubUserId = Number(identity.githubUserId);
-	if (identity.role === "admin" && !githubAllowlist(env.RUSTKORE_ADMIN_GITHUB_IDS).has(githubUserId)) return null;
-	if (identity.role === "reviewer" && !Boolean(identity.reviewerEnabled) && !githubAllowlist(env.RUSTKORE_REVIEWER_GITHUB_IDS).has(githubUserId)) return null;
+	if (!Number.isSafeInteger(Number(identity.githubUserId)) || Number(identity.githubUserId) <= 0 || !identity.githubLogin) return null;
+	identity.githubUserId = Number(identity.githubUserId);
 	return identity;
 }
 
-async function issueAgentCredential(db: D1Database, collaboratorId: string, name: string, role: Role) {
+async function issueAgentCredential(db: D1Database, collaboratorId: string, name: string, scope: CredentialScope) {
+	const role: Role = scope === "collaborate" ? "collaborator" : scope === "admin" ? "admin" : "reviewer";
 	const agentId = role === "collaborator" ? id() : null, tokenId = id();
 	const token = `rk_${randomSecret(48)}`;
 	const statements: D1PreparedStatement[] = [];
 	if (agentId) statements.push(db.prepare("INSERT INTO agents (id,collaborator_id,name,created_at) VALUES (?,?,?,unixepoch())").bind(agentId, collaboratorId, name));
-	statements.push(db.prepare("INSERT INTO tokens (id,token_hash,role,collaborator_id,agent_id,created_at) VALUES (?,?,?,?,?,unixepoch())")
-		.bind(tokenId, await sha256(token), role, collaboratorId, agentId));
+	statements.push(db.prepare("INSERT INTO tokens (id,token_hash,role,credential_scope,collaborator_id,agent_id,created_at) VALUES (?,?,?,?,?,?,unixepoch())")
+		.bind(tokenId, await sha256(token), role, scope, collaboratorId, agentId));
 	await db.batch(statements);
-	return { token, tokenId, role, agentId, name };
+	return { token, tokenId, role, scope, agentId, name };
 }
 
 function base64url(bytes: Uint8Array) {
@@ -91,26 +96,123 @@ function cookie(name: string, value: string, request: Request, maxAge: number, p
 	return `${name}=${encodeURIComponent(value)}; Path=${path}; Max-Age=${maxAge}; HttpOnly; SameSite=Lax${new URL(request.url).protocol === "https:" ? "; Secure" : ""}`;
 }
 
-function githubAllowlist(value: string | undefined) {
-	return new Set((value ?? "").split(",").map((item) => Number(item.trim())).filter((item) => Number.isSafeInteger(item) && item > 0));
-}
-
 async function githubFetch(request: Request, env: Env) {
 	try { return env.github_api ? await env.github_api.fetch(request) : await fetch(request); }
 	catch { throw new Error("GitHub authentication or validation is temporarily unavailable"); }
+}
+
+class AuthorizationUnavailable extends Error {
+	constructor(message = "GitHub organization permissions could not be confirmed; retry this privileged operation shortly") { super(message); }
+}
+
+const organizationId = "361817169";
+const requiredTeams = ["Maintainers", "Developers", "Release Managers"];
+const privilegedTeamIds: Record<string, number> = { Maintainers: 20908865, "Release Managers": 20908882 };
+const credentialCapabilities: Record<CredentialScope, Capability[]> = {
+	collaborate: ["collaborate"], review: ["review"], maintain: ["collaborate", "review", "maintain"],
+	release: ["collaborate", "release"], admin: ["collaborate", "review", "maintain", "release", "admin"],
+};
+
+async function githubOrganizationRequest(path: string, env: Env): Promise<{ status: number; value: any }> {
+	if (!env.GITHUB_API_TOKEN) throw new AuthorizationUnavailable("GITHUB_API_TOKEN is not configured; privileged access is temporarily unavailable");
+	let response: Response;
+	try { response = await githubFetch(new Request(`https://api.github.com${path}`, { headers: {
+		authorization: `Bearer ${env.GITHUB_API_TOKEN}`, accept: "application/vnd.github+json", "user-agent": "RustKore/0.1",
+		"x-github-api-version": "2022-11-28",
+	}, signal: AbortSignal.timeout(5000) }), env); }
+	catch { throw new AuthorizationUnavailable("GitHub is temporarily unavailable; privileged access was refused"); }
+	if (response.status === 404) return { status: 404, value: null };
+	if (response.status === 401) throw new AuthorizationUnavailable("GITHUB_API_TOKEN is expired or invalid; privileged access is temporarily unavailable");
+	if (response.status === 429 || response.status === 403 && (response.headers.get("x-ratelimit-remaining") === "0" || response.headers.has("retry-after"))) throw new AuthorizationUnavailable("GitHub API rate limit was reached; privileged access is temporarily unavailable");
+	if (response.status === 403) throw new AuthorizationUnavailable("GITHUB_API_TOKEN lacks required read-only organization member access");
+	if (response.status >= 500) throw new AuthorizationUnavailable("GitHub is temporarily unavailable; privileged access was refused");
+	if (!response.ok) throw new AuthorizationUnavailable("GitHub returned an ambiguous authorization response; privileged access was refused");
+	try { return { status: response.status, value: await response.json<any>() }; }
+	catch { throw new AuthorizationUnavailable(); }
+}
+
+async function organizationTeams(env: Env) {
+	const result = await githubOrganizationRequest("/orgs/RustKore/teams?per_page=100", env);
+	if (result.status !== 200 || !Array.isArray(result.value)) throw new AuthorizationUnavailable();
+	const wanted = new Map<string, { id: number; slug: string }>();
+	for (const team of result.value) {
+		if (team.privacy !== "closed" || team.parent != null) throw new AuthorizationUnavailable();
+		if (typeof team.name === "string" && requiredTeams.includes(team.name)) {
+			if (wanted.has(team.name) || !Number.isSafeInteger(team.id) || typeof team.slug !== "string" ||
+				(privilegedTeamIds[team.name] !== undefined && team.id !== privilegedTeamIds[team.name])) throw new AuthorizationUnavailable();
+			wanted.set(team.name, { id: team.id, slug: team.slug });
+		}
+		if (["administrators", "contributors"].includes(String(team.name).toLowerCase())) throw new AuthorizationUnavailable();
+	}
+	if (requiredTeams.some((name) => !wanted.has(name))) throw new AuthorizationUnavailable();
+	return wanted;
+}
+
+async function loadOrganizationPermissions(githubUserId: number, githubLogin: string, env: Env): Promise<OrganizationPermissions> {
+	const org = await githubOrganizationRequest("/orgs/RustKore", env);
+	if (org.status !== 200 || String(org.value?.id) !== organizationId) throw new AuthorizationUnavailable();
+	const username = encodeURIComponent(githubLogin);
+	const membership = await githubOrganizationRequest(`/orgs/RustKore/memberships/${username}`, env);
+	const empty = { capabilities: [] as Capability[], teams: [] as string[], expiresAt: Date.now() + 60_000 };
+	if (membership.status === 404) return empty;
+	if (membership.status !== 200 || Number(membership.value?.user?.id) !== githubUserId) throw new AuthorizationUnavailable();
+	if (membership.value?.state !== "active") return empty;
+	if (membership.value?.role === "admin") return { capabilities: ["collaborate", "review", "maintain", "release", "admin"], teams: ["Organization Owners"], expiresAt: Date.now() + 60_000 };
+	const teams = await organizationTeams(env);
+	const activeTeams: string[] = [];
+	const teamResults = await Promise.all([...teams.entries()].map(async ([name, team]) => {
+		const result = await githubOrganizationRequest(`/orgs/RustKore/teams/${encodeURIComponent(team.slug)}/memberships/${username}`, env);
+		if (result.status === 404) return null;
+		if (result.status !== 200) throw new AuthorizationUnavailable();
+		if (Number(result.value?.user?.id) !== githubUserId || Number(result.value?.team?.id) !== team.id) throw new AuthorizationUnavailable();
+		return result.value?.state === "active" ? name : null;
+	}));
+	for (const name of teamResults) if (name) activeTeams.push(name);
+	const capabilities: Capability[] = ["collaborate", ...(activeTeams.includes("Maintainers") ? ["review", "maintain"] as Capability[] : []), ...(activeTeams.includes("Release Managers") ? ["release"] as Capability[] : [])];
+	return { capabilities, teams: activeTeams, expiresAt: Date.now() + 60_000 };
+}
+
+async function organizationPermissions(identity: Identity | WebIdentity, env: Env, refresh = false): Promise<OrganizationPermissions> {
+	if (!refresh) {
+		const cached = organizationPermissionCache.get(identity.githubUserId);
+		if (cached && cached.expiresAt > Date.now()) return cached;
+	}
+	const permissions = await loadOrganizationPermissions(identity.githubUserId, identity.githubLogin, env);
+	organizationPermissionCache.set(identity.githubUserId, permissions);
+	if (organizationPermissionCache.size > 10_000) {
+		for (const [userId, entry] of organizationPermissionCache) if (entry.expiresAt <= Date.now()) organizationPermissionCache.delete(userId);
+	}
+	return permissions;
+}
+
+async function authorizeCapability(identity: Identity | WebIdentity, capability: Capability, env: Env, refresh = false) {
+	const permissions = await organizationPermissions(identity, env, refresh);
+	const granted = permissions.capabilities.includes(capability);
+	const scoped = "credentialScope" in identity ? credentialCapabilities[identity.credentialScope]?.includes(capability) : true;
+	if (!granted || !scoped) throw new Error("Forbidden: this operation is not allowed for the current GitHub team and credential scope");
+	return permissions;
+}
+
+async function capabilitiesForWeb(identity: WebIdentity, env: Env) {
+	try {
+		const permissions = await organizationPermissions(identity, env);
+		return { capabilities: permissions.capabilities, teams: permissions.teams, unavailable: false };
+	} catch {
+		return { capabilities: [] as Capability[], teams: [] as string[], unavailable: true };
+	}
 }
 
 async function getWebIdentity(request: Request, db: D1Database, env: Env): Promise<WebIdentity | null> {
 	const session = parseCookies(request).rk_session;
 	if (!session) return null;
 	const row = await db.prepare(`SELECT s.csrf_hash AS csrfHash,c.id AS collaboratorId,c.github_user_id AS githubUserId,
-		c.github_login AS githubLogin,c.name,c.avatar_url AS avatarUrl,c.reviewer_enabled AS reviewerEnabled
+		c.github_login AS githubLogin,c.name,c.avatar_url AS avatarUrl
 		FROM web_sessions s JOIN collaborators c ON c.id=s.collaborator_id
 		WHERE s.session_hash=? AND s.expires_at>unixepoch() AND c.suspended_at IS NULL`)
 		.bind(await sha256(session)).first<any>();
 	if (!row || !row.githubUserId) return null;
 	const githubUserId = Number(row.githubUserId);
-	return { ...row, csrfHash: row.csrfHash, githubUserId, reviewerEnabled: Boolean(row.reviewerEnabled) || githubAllowlist(env.RUSTKORE_REVIEWER_GITHUB_IDS).has(githubUserId), isAdmin: githubAllowlist(env.RUSTKORE_ADMIN_GITHUB_IDS).has(githubUserId) } as WebIdentity & { csrfHash: string };
+	return { ...row, csrfHash: row.csrfHash, githubUserId } as WebIdentity & { csrfHash: string };
 }
 
 async function requireWebWrite(request: Request, identity: WebIdentity, db: D1Database) {
@@ -119,11 +221,20 @@ async function requireWebWrite(request: Request, identity: WebIdentity, db: D1Da
 	if (!csrf || csrf !== cookies.rk_csrf || (await sha256(csrf)) !== (identity as WebIdentity & { csrfHash: string }).csrfHash) throw new Error("Forbidden: CSRF validation failed");
 }
 
+function oauthCallbackUrl(request: Request, env: Env) {
+	if (!env.GITHUB_OAUTH_CALLBACK_URL) return null;
+	const configured = new URL(env.GITHUB_OAUTH_CALLBACK_URL), origin = new URL(request.url).origin;
+	if ((configured.protocol !== "https:" && !["localhost", "127.0.0.1", "[::1]"].includes(configured.hostname)) || configured.pathname !== "/auth/callback" || configured.search || configured.hash) return null;
+	if (origin === configured.origin) return configured.toString();
+	if (origin === legacyPlatformOrigin) return `${legacyPlatformOrigin}/auth/callback`;
+	return null;
+}
+
 async function startGitHubLogin(request: Request, env: Env) {
 	if (!env.GITHUB_OAUTH_CLIENT_ID || !env.GITHUB_OAUTH_CALLBACK_URL) return json({ error: "GitHub OAuth is not configured" }, 503);
+	const callbackUrl = oauthCallbackUrl(request, env);
+	if (!callbackUrl) return json({ error: "GitHub sign-in is unavailable on this host" }, 421);
 	if (await anonymousRateLimited(request, env, "oauth")) return json({ error: "Rate limit exceeded" }, 429);
-	const callback = new URL(env.GITHUB_OAUTH_CALLBACK_URL);
-	if (callback.protocol !== "https:" && callback.hostname !== "localhost" && callback.hostname !== "127.0.0.1") return json({ error: "OAuth callback must use HTTPS" }, 500);
 	const state = randomSecret(), verifier = randomSecret(48), challenge = base64url(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))));
 	await env.rustkore_db.batch([
 		env.rustkore_db.prepare("DELETE FROM oauth_states WHERE expires_at<=unixepoch()"),
@@ -131,7 +242,7 @@ async function startGitHubLogin(request: Request, env: Env) {
 	]);
 	const authorize = new URL("https://github.com/login/oauth/authorize");
 	authorize.searchParams.set("client_id", env.GITHUB_OAUTH_CLIENT_ID);
-	authorize.searchParams.set("redirect_uri", callback.toString());
+	authorize.searchParams.set("redirect_uri", callbackUrl);
 	authorize.searchParams.set("scope", "read:user");
 	authorize.searchParams.set("state", state);
 	authorize.searchParams.set("code_challenge", challenge);
@@ -141,13 +252,15 @@ async function startGitHubLogin(request: Request, env: Env) {
 
 async function completeGitHubLogin(request: Request, env: Env) {
 	if (!env.GITHUB_OAUTH_CLIENT_ID || !env.GITHUB_OAUTH_CLIENT_SECRET || !env.GITHUB_OAUTH_CALLBACK_URL) return json({ error: "GitHub OAuth is not configured" }, 503);
+	const callbackUrl = oauthCallbackUrl(request, env);
+	if (!callbackUrl) return json({ error: "GitHub sign-in is unavailable on this host" }, 421);
 	if (await anonymousRateLimited(request, env, "oauth-callback")) return json({ error: "Rate limit exceeded" }, 429);
 	const url = new URL(request.url), cookies = parseCookies(request), state = url.searchParams.get("state"), code = url.searchParams.get("code");
 	if (url.searchParams.has("error") || !state || !code || !cookies.rk_oauth_state || state !== cookies.rk_oauth_state) return json({ error: "GitHub authorization was denied or its state is invalid" }, 400);
 	const stateRow = await env.rustkore_db.prepare("SELECT code_verifier AS codeVerifier FROM oauth_states WHERE state_hash=? AND expires_at>unixepoch()")
 		.bind(await sha256(state)).first<{ codeVerifier: string }>();
 	if (!stateRow) return json({ error: "GitHub authorization expired; start again" }, 400);
-	const tokenRequest = new URLSearchParams({ client_id: env.GITHUB_OAUTH_CLIENT_ID, client_secret: env.GITHUB_OAUTH_CLIENT_SECRET, code, redirect_uri: env.GITHUB_OAUTH_CALLBACK_URL, code_verifier: stateRow.codeVerifier });
+	const tokenRequest = new URLSearchParams({ client_id: env.GITHUB_OAUTH_CLIENT_ID, client_secret: env.GITHUB_OAUTH_CLIENT_SECRET, code, redirect_uri: callbackUrl, code_verifier: stateRow.codeVerifier });
 	const tokenResponse = await githubFetch(new Request("https://github.com/login/oauth/access_token", { method: "POST", headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" }, body: tokenRequest }), env);
 	if (!tokenResponse.ok) return json({ error: "GitHub authorization could not be completed" }, 502);
 	const token = await tokenResponse.json<any>();
@@ -203,7 +316,7 @@ function configuredGitHubRepository(env: Env) {
 	if (!repository || !repositoryId) throw new Error("GitHub repository identity is not configured (GITHUB_REPOSITORY and GITHUB_REPOSITORY_ID are required)");
 	if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error("GitHub repository is misconfigured");
 	if (!/^\d+$/.test(repositoryId)) throw new Error("GitHub repository ID is misconfigured; expected a numeric repository ID");
-	if (repository.toLowerCase() !== "boscv/rustkore" || repositoryId !== "1472554035") throw new Error("GitHub repository identity is misconfigured; expected boscv/RustKore (1472554035)");
+	if (repository.toLowerCase() !== "rustkore/rustkore" || repositoryId !== "1472554035") throw new Error("GitHub repository identity is misconfigured; expected RustKore/RustKore (1472554035)");
 	return { repository, repositoryId };
 }
 
@@ -230,13 +343,15 @@ async function verifyGitHubSubmission(commitSha: string, pullRequestUrl: string 
 	if (String(commit.sha).toLowerCase() !== commitSha.toLowerCase()) throw new Error("GitHub commit SHA does not match the submitted commit");
 	let parsed: URL;
 	try { parsed = new URL(pullRequestUrl); } catch { throw new Error("pullRequestUrl must be a GitHub pull request URL"); }
-	const match = parsed.hostname === "github.com" && parsed.protocol === "https:" && parsed.pathname.match(new RegExp(`^/${repository.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}/pull/(\\d+)/?$`, "i"));
+	const match = parsed.hostname === "github.com" && parsed.protocol === "https:" &&
+		parsed.pathname.match(/^\/(?:RustKore\/RustKore|boscv\/RustKore)\/pull\/(\d+)\/?$/i);
 	if (!match || parsed.search || parsed.hash || parsed.username || parsed.password) throw new Error("pullRequestUrl must point to a pull request in the configured repository");
-	const pull = await githubRepositoryPath(`/pulls/${match[1]}`, env);
+	const pullNumber = Number(match[1]);
+	const pull = await githubRepositoryPath(`/pulls/${pullNumber}`, env);
 	assertPullRequestRepository(pull, identity, commitSha);
 	if (Number(pull.user?.id) !== githubUserId) throw new Error("The pull request must be opened by the GitHub account linked to this MCP credential");
 	if (Number(commit.author?.id) !== githubUserId) throw new Error("The submitted commit must be authored by the GitHub account linked to this MCP credential");
-	return { pullRequestUrl: `https://github.com/${repository}/pull/${Number(match[1])}`, commitAuthorId: Number(commit.author.id) };
+	return { pullRequestUrl: `https://github.com/${repository}/pull/${pullNumber}`, commitAuthorId: Number(commit.author.id) };
 }
 
 async function createTask(db: D1Database, input: any, actor: Identity | string) {
@@ -273,9 +388,6 @@ async function getTask(db: D1Database, taskId: string) {
 		dependencies: dependencies.results.map((r) => r.depends_on_id), submissions: submissionRows.results.slice(0, 50), submissionHistoryTruncated: submissionRows.results.length > 50 };
 }
 
-function requireRole(identity: Identity, ...roles: Role[]) {
-	if (!roles.includes(identity.role)) throw new Error("Forbidden: this operation is not allowed for your role");
-}
 function requireAgent(identity: Identity) {
 	if (!identity.agentId) throw new Error("This token is not bound to an agent");
 }
@@ -284,7 +396,7 @@ function obj(value: unknown) { return value && typeof value === "object" && !Arr
 async function callTool(name: string, args: Record<string, any>, identity: Identity, db: D1Database, env: Env) {
 	switch (name) {
 		case "list_tasks": {
-			requireRole(identity, "admin", "collaborator", "reviewer");
+
 			const status = optText(args.status, 32);
 			const limit = Math.max(1, Math.min(100, Number.isInteger(args.limit) ? args.limit : 50));
 			let cursor: any = null;
@@ -305,7 +417,7 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 			return { tasks: page, nextCursor: hasMore && last ? btoa(JSON.stringify({ priority: last.priority, createdAt: last.createdAt, id: last.id })) : null };
 		}
 		case "claim_task": {
-			requireRole(identity, "collaborator"); requireAgent(identity);
+			requireAgent(identity);
 			const leaseId = id(), heartbeatIntervalSeconds = setting(env.HEARTBEAT_INTERVAL_SECONDS, DEFAULT_HEARTBEAT_SECONDS, 30, 600), leaseDurationSeconds = setting(env.LEASE_DURATION_SECONDS, Math.max(DEFAULT_LEASE_SECONDS, heartbeatIntervalSeconds + 30), heartbeatIntervalSeconds + 30, 3600);
 			const claimed = await db.batch([
 				db.prepare(`UPDATE tasks SET status='claimed', assignee_agent_id=?, lease_id=?, lease_until=unixepoch()+?, updated_at=unixepoch()
@@ -325,9 +437,9 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 			invalidateDashboard();
 			return { task: { ...row, heartbeatIntervalSeconds } };
 		}
-		case "get_task": requireRole(identity, "admin", "collaborator", "reviewer"); return getTask(db, text(args.taskId, "taskId", 80));
+		case "get_task":  return getTask(db, text(args.taskId, "taskId", 80));
 		case "heartbeat": {
-			requireRole(identity, "collaborator"); requireAgent(identity);
+			requireAgent(identity);
 			const heartbeatIntervalSeconds = setting(env.HEARTBEAT_INTERVAL_SECONDS, DEFAULT_HEARTBEAT_SECONDS, 30, 600);
 			const ts = now(), until = ts + setting(env.LEASE_DURATION_SECONDS, Math.max(DEFAULT_LEASE_SECONDS, heartbeatIntervalSeconds + 30), heartbeatIntervalSeconds + 30, 3600), taskId = text(args.taskId, "taskId", 80), leaseId = text(args.leaseId, "leaseId", 80);
 			const duration = setting(env.LEASE_DURATION_SECONDS, Math.max(DEFAULT_LEASE_SECONDS, heartbeatIntervalSeconds + 30), heartbeatIntervalSeconds + 30, 3600);
@@ -340,7 +452,7 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 			return current;
 		}
 		case "release_task": {
-			requireRole(identity, "collaborator"); requireAgent(identity);
+			requireAgent(identity);
 			const ts = now();
 			const taskId = text(args.taskId, "taskId", 80), leaseId = text(args.leaseId, "leaseId", 80), releaseMarker = `released:${id()}`;
 			const released = await db.batch([
@@ -357,7 +469,7 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 			return { released: true };
 		}
 		case "submit_task": {
-			requireRole(identity, "collaborator"); requireAgent(identity);
+			requireAgent(identity);
 			const taskId = text(args.taskId, "taskId", 80), leaseId = text(args.leaseId, "leaseId", 80);
 			const commitSha = text(args.commitSha, "commitSha", 40);
 			if (!/^[0-9a-f]{40}$/i.test(commitSha)) throw new Error("commitSha must be a full 40-character Git commit SHA");
@@ -375,7 +487,7 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 			return { submissionId, status: "pending" };
 		}
 		case "review_task": {
-			requireRole(identity, "reviewer", "admin");
+			await authorizeCapability(identity, "review", env, true);
 			const decision = args.decision;
 			if (decision !== "accepted" && decision !== "rejected") throw new Error("decision must be accepted or rejected");
 			const submissionId = text(args.submissionId, "submissionId", 80), ts = now();
@@ -396,7 +508,7 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 			return { reviewId, decision };
 		}
 		case "get_progress": {
-			requireRole(identity, "admin", "collaborator", "reviewer");
+
 			const state = taskDashboardStateSql("t");
 			const rows = await db.prepare(`SELECT CASE state WHEN 'available' THEN 'open' WHEN 'blocked' THEN 'open'
 				WHEN 'reserved' THEN 'claimed' WHEN 'in_review' THEN 'submitted' WHEN 'approved' THEN 'accepted' ELSE state END AS status,
@@ -405,7 +517,7 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 			return { tasks: rows.results, recentActivitySummary: activity.results };
 		}
 		case "get_activity": {
-			requireRole(identity, "admin", "collaborator", "reviewer");
+
 			const taskId = optText(args.taskId, 80), limit = Math.max(1, Math.min(100, Number.isInteger(args.limit) ? args.limit : 50));
 			let cursor: any = null;
 			if (args.cursor) { try { cursor = JSON.parse(atob(String(args.cursor))); } catch { throw new Error("cursor is invalid"); } }
@@ -418,7 +530,7 @@ async function callTool(name: string, args: Record<string, any>, identity: Ident
 			return { activities, nextCursor: hasMore && last ? btoa(JSON.stringify({ createdAt: last.createdAt, id: last.id })) : null };
 		}
 		case "get_project_context": {
-			requireRole(identity, "admin", "collaborator", "reviewer");
+
 			if (cachedContext && cachedContext.expires > Date.now()) return { content: cachedContext.content, updatedAt: cachedContext.updatedAt };
 			const row = await db.prepare("SELECT content,updated_at AS updatedAt FROM project_context WHERE id='default'").first<any>();
 			const value = row ?? { content: "", updatedAt: null };
@@ -926,8 +1038,9 @@ async function dashboardApi(request: Request, env: Env) {
 			(SELECT json_group_array(json_object('id',r.id,'code',r.code,'rationale',r.rationale,'awardedAt',r.awarded_at)) FROM collaborator_recognitions r WHERE r.collaborator_id=? ORDER BY r.awarded_at DESC) AS recognitionJson`)
 			.bind(identity.collaboratorId, identity.collaboratorId, identity.collaboratorId, identity.collaboratorId, identity.collaboratorId, identity.collaboratorId, identity.collaboratorId, identity.collaboratorId, identity.collaboratorId).first<any>();
 		const parseJson = (value: unknown) => { try { return JSON.parse(String(value ?? "[]")); } catch { return []; } };
+		const authorization = await capabilitiesForWeb(identity, env);
 		return json({ authenticated: true, collaboratorId: identity.collaboratorId, githubLogin: identity.githubLogin, name: identity.name,
-			avatarUrl: identity.avatarUrl, isAdmin: identity.isAdmin, reviewerEnabled: identity.reviewerEnabled, csrfToken: parseCookies(request).rk_csrf ?? "",
+			avatarUrl: identity.avatarUrl, ...authorization, isAdmin: authorization.capabilities.includes("admin"), reviewerEnabled: authorization.capabilities.includes("review"), csrfToken: parseCookies(request).rk_csrf ?? "",
 			personal: { agents: personal?.agents ?? 0, activeCredentials: personal?.activeCredentials ?? 0, reservations: personal?.reservations ?? 0, submissions: personal?.submissions ?? 0, integrated: personal?.integrated ?? 0, reviews: personal?.reviews ?? 0,
 				reservationsList: parseJson(personal?.reservationJson), submissionsList: parseJson(personal?.submissionJson), recognitions: parseJson(personal?.recognitionJson) } }, 200, { "cache-control": "no-store" });
 	}
@@ -945,7 +1058,15 @@ async function dashboardApi(request: Request, env: Env) {
 	const identity = await getWebIdentity(request, db, env);
 	if (!identity) return json({ error: "Authentication required" }, 401, { "cache-control": "no-store" });
 	if (["POST", "PATCH", "PUT", "DELETE"].includes(request.method)) await requireWebWrite(request, identity, db);
-	if (path.startsWith("/api/admin/roadmap/") && !identity.isAdmin) return json({ error: "Maintainer access required" }, 403);
+	if (path.startsWith("/api/admin/")) {
+		const capability: Capability = path.startsWith("/api/admin/roadmap/acceptance/") ? "release"
+			: path.startsWith("/api/admin/roadmap/") || path.startsWith("/api/admin/tasks") || path.startsWith("/api/admin/submissions") ? "maintain" : "admin";
+		try { await authorizeCapability(identity, capability, env, ["POST", "PATCH", "PUT", "DELETE"].includes(request.method)); }
+		catch (error) {
+			if (error instanceof AuthorizationUnavailable) return json({ error: error.message }, 503, { "retry-after": "30" });
+			return json({ error: error instanceof Error ? error.message : "Forbidden" }, 403);
+		}
+	}
 	if (path === "/api/admin/roadmap/catalog" && request.method === "GET") {
 		const row = await db.prepare(`SELECT catalog_version AS catalogVersion,source_revision AS sourceRevision,imported_at AS importedAt,feature_count AS totalRequirements
 			FROM roadmap_catalog_imports ORDER BY imported_at DESC,rowid DESC LIMIT 1`).first<any>();
@@ -1098,19 +1219,24 @@ async function dashboardApi(request: Request, env: Env) {
 		return json({ updated: true, featureId: evidence.featureId, valid: body.valid });
 	}
 	if (path === "/api/tokens" && request.method === "GET") {
-		const rows = await db.prepare(`SELECT t.id AS tokenId,t.role,t.created_at AS createdAt,t.revoked_at AS revokedAt,a.name AS agentName
+		const rows = await db.prepare(`SELECT t.id AS tokenId,t.role,t.credential_scope AS scope,t.created_at AS createdAt,t.revoked_at AS revokedAt,a.name AS agentName
 			FROM tokens t LEFT JOIN agents a ON a.id=t.agent_id WHERE t.collaborator_id=? ORDER BY t.created_at DESC LIMIT 100`).bind(identity.collaboratorId).all();
 		return json({ tokens: rows.results }, 200, { "cache-control": "no-store" });
 	}
 	if (path === "/api/tokens" && request.method === "POST") {
-		const body = await request.json<any>(), role = body.role ?? "collaborator";
-		if (!(["collaborator", "reviewer", "admin"] as string[]).includes(role)) return json({ error: "Unknown token role" }, 400);
-		if (role === "reviewer" && !identity.isAdmin && !identity.reviewerEnabled) return json({ error: "Reviewer role is not enabled for this GitHub account" }, 403);
-		if (role === "admin" && !identity.isAdmin) return json({ error: "Administrator role is not enabled for this GitHub account" }, 403);
+		const body = await request.json<any>(), scope: CredentialScope = body.scope ?? (body.role === "admin" ? "admin" : body.role === "reviewer" ? "review" : "collaborate");
+		if (!("collaborate review maintain release admin".split(" ") as string[]).includes(scope)) return json({ error: "Unknown token scope" }, 400);
+		if (scope !== "collaborate") {
+			try { await authorizeCapability(identity, scope, env, true); }
+			catch (error) {
+				if (error instanceof AuthorizationUnavailable) return json({ error: error.message }, 503, { "retry-after": "30" });
+				return json({ error: error instanceof Error ? error.message : "Credential scope is not allowed" }, 403);
+			}
+		}
 		const count = await db.prepare("SELECT COUNT(*) AS count FROM tokens WHERE collaborator_id=? AND revoked_at IS NULL").bind(identity.collaboratorId).first<any>();
 		if (Number(count?.count ?? 0) >= 20) return json({ error: "Revoke an unused token before creating another (limit: 20 active tokens)" }, 409);
 		try {
-			const created = await issueAgentCredential(db, identity.collaboratorId, text(body.name, "name", 120), role);
+			const created = await issueAgentCredential(db, identity.collaboratorId, text(body.name, "name", 120), scope);
 			return json(created, 201, { "cache-control": "no-store" });
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "";
@@ -1123,7 +1249,6 @@ async function dashboardApi(request: Request, env: Env) {
 			.bind(decodeURIComponent(tokenMatch[1]), identity.collaboratorId).run();
 		return json({ revoked: (result.meta.changes ?? 0) === 1 });
 	}
-	if (path.startsWith("/api/admin/") && !identity.isAdmin) return json({ error: "Administrator access required" }, 403);
 	if (path === "/api/admin/context" && request.method === "GET") {
 		const row = await db.prepare("SELECT content,updated_at AS updatedAt FROM project_context WHERE id='default'").first<any>();
 		return json(row ?? { content: "", updatedAt: null }, 200, { "cache-control": "no-store" });
@@ -1150,7 +1275,7 @@ async function dashboardApi(request: Request, env: Env) {
 			try { cursor = JSON.parse(atob(url.searchParams.get("cursor")!)); } catch { return json({ error: "Invalid cursor" }, 400); }
 			if (!cursor || typeof cursor.login !== "string" || typeof cursor.id !== "string") return json({ error: "Invalid cursor" }, 400);
 		}
-		const rows = await db.prepare(`SELECT c.id,c.name,c.github_login AS login,c.avatar_url AS avatarUrl,c.reviewer_enabled AS reviewerEnabled,
+		const rows = await db.prepare(`SELECT c.id,c.name,c.github_login AS login,c.avatar_url AS avatarUrl,
 			c.suspended_at AS suspendedAt,c.created_at AS createdAt,COUNT(DISTINCT i.id) AS integratedCount,
 			(SELECT COUNT(*) FROM reviews r WHERE r.reviewer_id=c.id) AS reviewCount,
 			(SELECT json_group_array(json_object('id',r.id,'code',r.code,'rationale',r.rationale,'awardedAt',r.awarded_at)) FROM collaborator_recognitions r WHERE r.collaborator_id=c.id ORDER BY r.awarded_at DESC) AS recognitionsJson
@@ -1164,17 +1289,11 @@ async function dashboardApi(request: Request, env: Env) {
 	const collaboratorMatch = path.match(/^\/api\/admin\/collaborators\/([^/]+)$/);
 	if (collaboratorMatch && request.method === "PATCH") {
 		const body = await request.json<any>(), collaboratorId = decodeURIComponent(collaboratorMatch[1]);
-		if (body.reviewerEnabled === undefined && body.suspended === undefined) return json({ error: "Set reviewerEnabled or suspended" }, 400);
-		if (body.reviewerEnabled !== undefined && typeof body.reviewerEnabled !== "boolean") return json({ error: "reviewerEnabled must be a boolean" }, 400);
-		if (body.suspended !== undefined && typeof body.suspended !== "boolean") return json({ error: "suspended must be a boolean" }, 400);
+		if (typeof body.suspended !== "boolean" || Object.keys(body).some((key) => key !== "suspended")) return json({ error: "Set suspended to a boolean" }, 400);
 		if (body.suspended === true && collaboratorId === identity.collaboratorId) return json({ error: "An administrator cannot suspend their own account" }, 409);
-		const statements: D1PreparedStatement[] = [];
-		if (body.reviewerEnabled !== undefined) statements.push(db.prepare("UPDATE collaborators SET reviewer_enabled=? WHERE id=? AND github_user_id IS NOT NULL").bind(body.reviewerEnabled ? 1 : 0, collaboratorId));
-		if (body.suspended !== undefined) {
-			statements.push(db.prepare("UPDATE collaborators SET suspended_at=? WHERE id=? AND github_user_id IS NOT NULL").bind(body.suspended ? now() : null, collaboratorId));
-			if (body.suspended) statements.push(db.prepare("UPDATE tokens SET revoked_at=unixepoch() WHERE collaborator_id=? AND revoked_at IS NULL").bind(collaboratorId));
-			if (body.suspended) statements.push(db.prepare("DELETE FROM web_sessions WHERE collaborator_id=?").bind(collaboratorId));
-		}
+		const statements: D1PreparedStatement[] = [db.prepare("UPDATE collaborators SET suspended_at=? WHERE id=? AND github_user_id IS NOT NULL").bind(body.suspended ? now() : null, collaboratorId)];
+		if (body.suspended) statements.push(db.prepare("UPDATE tokens SET revoked_at=unixepoch() WHERE collaborator_id=? AND revoked_at IS NULL").bind(collaboratorId));
+		if (body.suspended) statements.push(db.prepare("DELETE FROM web_sessions WHERE collaborator_id=?").bind(collaboratorId));
 		await db.batch(statements);
 		return json({ updated: true });
 	}
@@ -1196,7 +1315,7 @@ async function dashboardApi(request: Request, env: Env) {
 		}
 	}
 	if (path === "/api/admin/tasks" && request.method === "POST") {
-		const actor: Identity = { id: identity.collaboratorId, role: "admin", collaboratorId: identity.collaboratorId, agentId: null, name: identity.name, githubUserId: identity.githubUserId, githubLogin: identity.githubLogin };
+		const actor: Identity = { id: identity.collaboratorId, role: "admin", credentialScope: "admin", collaboratorId: identity.collaboratorId, agentId: null, name: identity.name, githubUserId: identity.githubUserId, githubLogin: identity.githubLogin };
 		try { return json(await createTask(db, await request.json<any>(), actor), 201); }
 		catch (error) { return json({ error: error instanceof Error ? error.message : "Task could not be created" }, 400); }
 	}
@@ -1284,6 +1403,7 @@ async function handleFetch(request: Request, env: Env): Promise<Response> {
 			try { return await dashboardApi(request, env); }
 			catch (error) {
 				const message = error instanceof Error ? error.message : "Request failed";
+				if (error instanceof AuthorizationUnavailable) return json({ error: message }, 503, { "retry-after": "30" });
 				if (message.startsWith("Forbidden:")) return json({ error: message }, 403);
 				if (/D1_ERROR|SQLITE/i.test(message)) return json({ error: "Storage is temporarily unavailable; retry the request" }, 503, { "retry-after": "30" });
 				if (error instanceof SyntaxError || /must be|cursor|Provide a task field|Invalid task|Invalid dependency|dependencies must|Choose a supported|rationale must|complexity/i.test(message)) return json({ error: message }, 400);
@@ -1293,13 +1413,13 @@ async function handleFetch(request: Request, env: Env): Promise<Response> {
 		if (url.pathname === "/mcp") return mcp(request, env);
 		if (url.pathname === "/setup" && request.method === "POST") {
 			if (await anonymousRateLimited(request, env, "bootstrap")) return json({ error: "Rate limit exceeded" }, 429);
-			return json({ error: "Bootstrap credentials are retired. Configure a GitHub administrator allowlist and sign in with GitHub." }, 410);
+	return json({ error: "Bootstrap credentials are retired. Organization Owners sign in with GitHub." }, 410);
 		}
 		const identity = await authenticate(request, env);
 		if (url.pathname.startsWith("/admin/")) {
 			if (!identity) return json({ error: "Unauthorized" }, 401);
 			try {
-				requireRole(identity, "admin");
+				await authorizeCapability(identity, "admin", env, request.method !== "GET");
 				if (await rateLimited(identity, "admin", env)) return json({ error: "Rate limit exceeded; retry after 60 seconds" }, 429);
 				if (url.pathname === "/admin/credentials" && request.method === "GET") {
 					const credentials = await db.prepare(`SELECT t.id AS tokenId,t.role,t.created_at AS createdAt,t.revoked_at AS revokedAt,c.id AS collaboratorId,c.name AS collaborator,a.id AS agentId,a.name AS agent
@@ -1352,7 +1472,8 @@ async function handleFetch(request: Request, env: Env): Promise<Response> {
 				return json({ error: "Not found" }, 404);
 			} catch (e) {
 				const message = e instanceof Error ? e.message : "Request failed";
-				return json({ error: message }, message.startsWith("Forbidden:") ? 403 : message.includes("cycle") ? 409 : 400);
+				if (e instanceof AuthorizationUnavailable) return json({ error: message }, 503, { "retry-after": "30" });
+				return json({ error: message }, e instanceof AuthorizationUnavailable ? 503 : message.startsWith("Forbidden:") ? 403 : message.includes("cycle") ? 409 : 400, e instanceof AuthorizationUnavailable ? { "retry-after": "30" } : undefined);
 			}
 		}
 		if (env.ASSETS) return env.ASSETS.fetch(request);

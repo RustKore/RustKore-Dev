@@ -1,7 +1,6 @@
 GITHUB_API_TOKEN=replace-with-a-read-only-github-token
-GITHUB_REPOSITORY=boscv/RustKore
+GITHUB_REPOSITORY=RustKore/RustKore
+GITHUB_REPOSITORY_ID=1472554035
 GITHUB_OAUTH_CLIENT_ID=replace-with-github-oauth-client-id
 GITHUB_OAUTH_CLIENT_SECRET=replace-with-github-oauth-client-secret
 GITHUB_OAUTH_CALLBACK_URL=http://localhost:8787/auth/callback
-RUSTKORE_ADMIN_GITHUB_IDS=replace-with-numeric-github-user-id
-RUSTKORE_REVIEWER_GITHUB_IDS=

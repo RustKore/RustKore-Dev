@@ -241,7 +241,7 @@ function renderActivity(items=[]) {
 }
 function renderHistory(items=[]) {
  const list=$("#history-list");list.replaceChildren();if(!items.length){list.append(el("li","empty-state","No contributions have been submitted yet."));return;}
- items.slice(0,10).forEach(item=>{const row=el("li","contribution-row"),main=el("div","contribution-main"),task=el("button","inline-task-link",item.title);task.type="button";task.addEventListener("click",()=>navigateToTask(item.taskId));main.append(task,el("span","contribution-meta",`@${item.login||"contributor"} · ${item.module||"Module"} · ${contributionStatusLabel(item.status)}`));row.append(main);const link=safeGitHubUrl(item.pullRequestUrl);if(link){const pr=el("a","history-link");setLink(pr,link,"Pull request ↗");row.append(pr);}else if(/^[0-9a-f]{7,40}$/i.test(item.commitSha||"")){const commit=el("a","history-link");setLink(commit,`https://github.com/boscv/RustKore/commit/${encodeURIComponent(item.commitSha)}`,"Commit ↗");row.append(commit);}const timestamp=item.integratedAt||item.createdAt,label=item.integratedAt?"Integrated":"Submitted";row.append(el("time","activity-time",`${label} ${timeAgo(timestamp)}`));list.append(row);});
+ items.slice(0,10).forEach(item=>{const row=el("li","contribution-row"),main=el("div","contribution-main"),task=el("button","inline-task-link",item.title);task.type="button";task.addEventListener("click",()=>navigateToTask(item.taskId));main.append(task,el("span","contribution-meta",`@${item.login||"contributor"} · ${item.module||"Module"} · ${contributionStatusLabel(item.status)}`));row.append(main);const link=safeGitHubUrl(item.pullRequestUrl);if(link){const pr=el("a","history-link");setLink(pr,link,"Pull request ↗");row.append(pr);}else if(/^[0-9a-f]{7,40}$/i.test(item.commitSha||"")){const commit=el("a","history-link");setLink(commit,`https://github.com/RustKore/RustKore/commit/${encodeURIComponent(item.commitSha)}`,"Commit ↗");row.append(commit);}const timestamp=item.integratedAt||item.createdAt,label=item.integratedAt?"Integrated":"Submitted";row.append(el("time","activity-time",`${label} ${timeAgo(timestamp)}`));list.append(row);});
 }
 function historyFilters(kind){const form=$(kind==="activity"?"#activity-filters":"#contribution-filters"),values=new FormData(form),params=new URLSearchParams({limit:"25"});for(const key of ["type","status","contributor","module","period"]){const value=String(values.get(key)||"");if(value&&value!=="all")params.set(key,value);}return params;}
 async function loadPublicHistory(kind,cursor=null){
@@ -278,7 +278,14 @@ function renderAccount(session) {
  const awards = $("#personal-recognitions"); awards.replaceChildren();
  if (!person.recognitions?.length) awards.append(el("li", "empty-state", "Recognitions appear here when maintainers award them."));
  (person.recognitions || []).forEach(award => awards.append(renderAward(award)));
- if (session.isAdmin) { $("#admin-nav").hidden = false; $("#administration").hidden = false; }
+ const caps = new Set(session.capabilities || []), isOwner = caps.has("admin"), canMaintain = isOwner || caps.has("maintain");
+ if (canMaintain) { $("#admin-nav").hidden = false; $("#administration").hidden = false; }
+ const scopeSelect = $("#token-form [name=scope]");
+ scopeSelect.querySelector('[value="maintain"]').hidden = !canMaintain;
+ scopeSelect.querySelector('[value="release"]').hidden = !(isOwner || caps.has("release"));
+ scopeSelect.querySelector('[value="admin"]').hidden = !isOwner;
+ $("#context-admin-block").hidden = !isOwner;
+ $('[data-requires-owner]').forEach(tab => { tab.hidden = !isOwner; });
 }
 function renderPersonalList(selector, values, label, empty, onSelect) {
  const list = $(selector); list.replaceChildren();
@@ -293,7 +300,7 @@ async function loadTokens() {
  const result = await api("/api/tokens"), list = $("#token-list"); list.replaceChildren();
  if (!result.tokens.length) list.append(el("li", "empty-state", "No MCP credentials have been created."));
  result.tokens.forEach(token => {
-  const item = el("li", "token-row"), info = el("div", "token-info"); info.append(el("strong", "token-name", token.agentName || token.role), el("span", "token-meta", `${token.role} · created ${timeAgo(token.createdAt)}${token.revokedAt ? " · revoked" : ""}`)); item.append(info);
+  const item = el("li", "token-row"), info = el("div", "token-info"); info.append(el("strong", "token-name", token.agentName || token.scope), el("span", "token-meta", `${token.scope} scope · created ${timeAgo(token.createdAt)}${token.revokedAt ? " · revoked" : ""}`)); item.append(info);
   if (!token.revokedAt) { const revoke = el("button", "button button-quiet", "Revoke"); revoke.type = "button"; revoke.addEventListener("click", async () => { revoke.disabled = true; try { await api(`/api/tokens/${encodeURIComponent(token.tokenId)}`, { method: "DELETE" }); notice("Credential revoked."); await loadSession(); } catch (error) { notice(error.message); revoke.disabled = false; } }); item.append(revoke); }
   else item.classList.add("revoked"); list.append(item);
  });
@@ -314,8 +321,12 @@ function createDependencyPicker(root, initial = [], excludeTaskId = null) {
 }
 async function loadAdmin() {
  try {
+  const isOwner = account?.capabilities?.includes("admin");
   if(!taskDependencyPicker) taskDependencyPicker=createDependencyPicker($("#task-form [data-dependency-picker]"));
-  const [submissions, collaborators, context, catalog] = await Promise.all([api("/api/admin/submissions"), api("/api/admin/collaborators?limit=100"), api("/api/admin/context"), api("/api/admin/roadmap/catalog")]);
+  const [submissions, collaborators, context, catalog] = await Promise.all([
+   api("/api/admin/submissions"), isOwner ? api("/api/admin/collaborators?limit=100") : Promise.resolve({collaborators:[]}),
+   isOwner ? api("/api/admin/context") : Promise.resolve({content:""}), api("/api/admin/roadmap/catalog")
+  ]);
   const submissionList = $("#submission-list"); submissionList.replaceChildren();
   if (!submissions.submissions.length) { const empty=el("li","admin-empty-state"),icon=el("span","admin-empty-icon");icon.innerHTML='<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8v13H3V3h13"/><path d="m16 3 5 5M8 12h8M8 16h8M8 8h3"/></svg>';empty.append(icon);const copy=el("div","","");copy.append(el("strong","","No pending submissions."),el("p","","Submitted contributions will appear here when they require review or integration."));empty.append(copy);submissionList.append(empty); }
   submissions.submissions.forEach(item => {
@@ -332,7 +343,6 @@ async function loadAdmin() {
    const row = el("li", "admin-row collaborator-admin-row"), identityArea=el("section","collaborator-area collaborator-identity"), identityHead=el("div","collaborator-identity-head"), avatarUrl=safeAvatarUrl(person.avatarUrl);
    if(avatarUrl){const avatar=el("img","collaborator-avatar");avatar.src=avatarUrl;avatar.alt="";avatar.width=36;avatar.height=36;identityHead.append(avatar);}else{const avatar=el("span","collaborator-avatar avatar-fallback",initials(person.name||person.login));avatar.setAttribute("aria-hidden","true");identityHead.append(avatar);}
    const profile=el("a","collaborator-login",`@${person.login}`);setLink(profile,`https://github.com/${encodeURIComponent(person.login)}`,`@${person.login}`);identityHead.append(profile);identityArea.append(el("h4","","Identity and contribution history"),identityHead,el("p","collaborator-stats",`${count(person.integratedCount)} integrated contributions · ${count(person.reviewCount)} reviews`));
-   const reviewerArea=el("section","collaborator-area"),reviewerState=el("p","collaborator-state",`Reviewer access · ${person.reviewerEnabled?"Enabled":"Disabled"}`),review=el("button","button button-quiet","" );review.type="button";review.textContent=person.reviewerEnabled?"Remove reviewer":"Enable reviewer";review.addEventListener("click",()=>updatePerson(person,{reviewerEnabled:!Boolean(person.reviewerEnabled)}));reviewerArea.append(el("h4","","Reviewer access"),reviewerState,el("p","field-help","Allows independent reviews of submitted contributions."),review);
    const accountArea=el("section","collaborator-area collaborator-account-area"),suspended=Boolean(person.suspendedAt),suspend=el("button",`button ${suspended?"button-quiet":"button-danger"}`,suspended?"Reactivate":"Suspend");suspend.type="button";suspend.addEventListener("click",()=>{if(suspended&&!confirm(`Reactivate @${person.login}?`))return;if(!suspended&&!confirm(`Suspend @${person.login}? Their active credentials and web sessions will be revoked.`))return;updatePerson(person,{suspended:!suspended});});accountArea.append(el("h4","","Account status"),el("p","collaborator-state",`Account · ${suspended?"Suspended":"Active"}`),el("p","field-help","Suspending blocks sign-in and revokes active sessions and credentials."),suspend);
    const recognitionArea=el("section","collaborator-area collaborator-recognitions"),awards=el("div","admin-awards"); (person.recognitions || []).forEach(award => awards.append(el("span", "award-chip", AWARDS[award.code] || "Recognition")));
    const form = document.createElement("form"); form.className = "recognition-form";
@@ -344,10 +354,10 @@ async function loadAdmin() {
     const grant = el("button", "button", "Award recognition"); grant.type = "submit";grant.disabled=true;rationale.addEventListener("input",()=>{grant.disabled=!rationale.value.trim();}); form.append(recognitionLabel, reasonLabel, grant);
     form.addEventListener("submit", async event => { event.preventDefault(); const values = new FormData(form), reason=String(values.get("rationale")||"").trim();if(!reason||!confirm(`Award ${select.selectedOptions[0]?.textContent||"this recognition"} to @${person.login}? Recognitions are permanent.`))return;grant.disabled=true;try { await api(`/api/admin/collaborators/${encodeURIComponent(person.id)}/recognitions`, { method: "POST", body: JSON.stringify({ code: values.get("code"), rationale: reason }) }); notice("Permanent recognition recorded."); await loadAdmin(); await refreshDashboard(true); } catch (error) { notice(error.message); grant.disabled = false; } });
    } else form.append(el("span", "quiet-label", "All currently permitted recognitions have been awarded."));
-   recognitionArea.append(form);row.append(identityArea,reviewerArea,accountArea,recognitionArea);people.append(row);
+   recognitionArea.append(form);row.append(identityArea,accountArea,recognitionArea);people.append(row);
   });
   $("#context-content").value = context.content || "";
-  const metadata=$("#roadmap-catalog-metadata");metadata.replaceChildren();[["Catalog version",catalog.catalogVersion||"—"],["Source revision",catalog.sourceRevision||"—"],["Last imported",catalog.importedAt?dateTime(catalog.importedAt):"—"],["Total requirements",catalog.totalRequirements??"—"]].forEach(([label,value])=>{const row=el("div","catalog-meta-row"),term=el("dt","",label),definition=el("dd");if(label==="Source revision"&&catalog.sourceRevision){const link=el("a","catalog-revision-link",`${String(value).slice(0,10)}…`);setLink(link,`https://github.com/boscv/RustKore/commit/${encodeURIComponent(catalog.sourceRevision)}`,`${String(value).slice(0,10)}…`);link.title=String(value);definition.append(link);}else definition.textContent=String(value);row.append(term,definition);metadata.append(row);});
+  const metadata=$("#roadmap-catalog-metadata");metadata.replaceChildren();[["Catalog version",catalog.catalogVersion||"—"],["Source revision",catalog.sourceRevision||"—"],["Last imported",catalog.importedAt?dateTime(catalog.importedAt):"—"],["Total requirements",catalog.totalRequirements??"—"]].forEach(([label,value])=>{const row=el("div","catalog-meta-row"),term=el("dt","",label),definition=el("dd");if(label==="Source revision"&&catalog.sourceRevision){const link=el("a","catalog-revision-link",`${String(value).slice(0,10)}…`);setLink(link,`https://github.com/RustKore/RustKore/commit/${encodeURIComponent(catalog.sourceRevision)}`,`${String(value).slice(0,10)}…`);link.title=String(value);definition.append(link);}else definition.textContent=String(value);row.append(term,definition);metadata.append(row);});
  } catch (error) { notice(error.message); }
 }
 async function updatePerson(person, patch) {
@@ -360,7 +370,7 @@ async function loadSession() {
   $("#account-nav").hidden = true; $("#admin-nav").hidden = true; $("#account").hidden = true; $("#administration").hidden = true; return;
  }
  account = session; csrf = session.csrfToken; $("#login-link").hidden = true; $("#logout-button").hidden = false; $("#account-label").textContent = `@${session.githubLogin}`;
- renderAccount(session); await loadTokens(); if (session.isAdmin) await loadAdmin();
+ renderAccount(session); await loadTokens(); if ((session.capabilities || []).includes("maintain") || (session.capabilities || []).includes("admin")) await loadAdmin();
 }
 async function refreshDashboard(force = false) {
  try {
@@ -400,7 +410,7 @@ function renderTaskDetail(task) {
  if (task.state === "blocked") { const waiting = (task.dependencies || []).filter(item => item.state !== "approved" && item.state !== "integrated"); root.append(el("p", "dependency-note", waiting.length ? `Blocked until ${waiting.map(item => item.title).join(", ")} is approved or integrated.` : "This task is waiting on its prerequisites.")); }
  if (task.submissions?.length) root.append(renderSubmissions(task.submissions));
  if (task.activity?.length) root.append(renderTaskActivity(task.activity));
- if (account?.isAdmin && ["available", "blocked"].includes(task.state)) root.append(renderTaskEditor(task));
+ if ((account?.capabilities?.includes("maintain") || account?.capabilities?.includes("admin")) && ["available", "blocked"].includes(task.state)) root.append(renderTaskEditor(task));
 }
 function renderTaskRelations(title, items) {
  const section = el("section", "detail-section"), heading = el("h3", "", title), list = el("ul", "relation-list"); section.append(heading);
@@ -412,14 +422,14 @@ function renderSubmissions(items) {
  const section = el("section", "detail-section"), list = el("ol", "detail-event-list"); section.append(el("h3", "", "Contributions and reviews"));
   items.forEach(item => { const row = el("li", "detail-event"), main = el("div", "detail-event-main"); main.append(el("strong", "", `${contributionStatusLabel(item.status === "integrated" ? "integrated" : item.status)} · ${dateTime(item.createdAt)}`), el("p", "", item.summary || "Contribution submitted for review."));
   const links = el("div", "detail-links"), pr = el("a", "copy-button"); setLink(pr, safeGitHubUrl(item.pullRequestUrl), "Pull request ↗"); if (pr.href) links.append(pr);
-  if (item.commitSha) { const commit = el("a", "copy-button"); setLink(commit, `https://github.com/boscv/RustKore/commit/${encodeURIComponent(item.commitSha)}`, `Commit ${item.commitSha.slice(0, 8)} ↗`); links.append(commit); }
+  if (item.commitSha) { const commit = el("a", "copy-button"); setLink(commit, `https://github.com/RustKore/RustKore/commit/${encodeURIComponent(item.commitSha)}`, `Commit ${item.commitSha.slice(0, 8)} ↗`); links.append(commit); }
   if (item.reviewDecision) main.append(el("span", "quiet-label", `Reviewed by @${item.reviewer || "reviewer"} · ${item.reviewDecision}`)); if (item.integratedAt) main.append(el("span", "quiet-label", `Integrated at ${dateTime(item.integratedAt)} · ${String(item.mergeCommitSha || "").slice(0, 8)}`)); row.append(main, links); list.append(row);
  }); section.append(list); return section;
 }
 function renderTaskActivity(items) {
  const section = el("section", "detail-section"), list = el("ol", "detail-event-list"); section.append(el("h3", "", "Task history"));
  items.forEach(item => { const row = el("li", "detail-history-row"), actor = item.actor ? `@${item.actor}` : "System", action = ({ "task.created": "created", "task.claimed": "reserved", "task.released": "returned to the queue", "task.submitted": "submitted a contribution", "submission.accepted": "approved", "submission.rejected": "requested changes", "task.integrated": "integrated", "task.updated": "updated" })[item.action] || item.action;
-  row.append(el("span", "", `${actor} ${action}`), el("time", "", timeAgo(item.createdAt))); const link = safeGitHubUrl(item.pullRequestUrl); if (link) { const pr = el("a", "copy-button"); setLink(pr, link, "PR ↗"); row.append(pr); } else if (/^[0-9a-f]{7,40}$/i.test(item.commitSha || "")) { const commit = el("a", "copy-button"); setLink(commit, `https://github.com/boscv/RustKore/commit/${encodeURIComponent(item.commitSha)}`, "Commit ↗"); row.append(commit); } list.append(row);
+  row.append(el("span", "", `${actor} ${action}`), el("time", "", timeAgo(item.createdAt))); const link = safeGitHubUrl(item.pullRequestUrl); if (link) { const pr = el("a", "copy-button"); setLink(pr, link, "PR ↗"); row.append(pr); } else if (/^[0-9a-f]{7,40}$/i.test(item.commitSha || "")) { const commit = el("a", "copy-button"); setLink(commit, `https://github.com/RustKore/RustKore/commit/${encodeURIComponent(item.commitSha)}`, "Commit ↗"); row.append(commit); } list.append(row);
  }); section.append(list); return section;
 }
 function renderTaskEditor(task) {
@@ -478,7 +488,7 @@ $$('[data-copy]').forEach(button => button.addEventListener("click", () => copyT
 $$('[data-copy-target]').forEach(button => button.addEventListener("click", () => copyText($("#" + button.dataset.copyTarget).textContent)));
 $("#token-form").addEventListener("submit", async event => {
  event.preventDefault(); const form = new FormData(event.currentTarget), button = $("button[type=submit]", event.currentTarget); button.disabled = true;
- try { const token = await api("/api/tokens", { method: "POST", body: JSON.stringify({ name: form.get("name"), role: form.get("role") }) }), box = $("#new-token");
+ try { const token = await api("/api/tokens", { method: "POST", body: JSON.stringify({ name: form.get("name"), scope: form.get("scope") }) }), box = $("#new-token");
   box.replaceChildren(el("p", "", `Credential “${token.name}” created. Copy it now; it will not be shown again.`), el("code", "mono", token.token)); const copy = el("button", "button button-quiet", "Copy token"); copy.type = "button"; copy.addEventListener("click", () => copyText(token.token)); box.append(copy); box.hidden = false; event.currentTarget.reset(); await loadSession();
  } catch (error) { notice(error.message); } finally { button.disabled = false; }
 });

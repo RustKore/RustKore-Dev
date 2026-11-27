@@ -14,6 +14,7 @@ import collaboratorPublicLoginIndexMigration from "../migrations/0010_collaborat
 import featureRoadmapMigration from "../migrations/0011_feature_roadmap.sql?raw";
 import refinedRoadmapMigration from "../migrations/0012_feature_roadmap_refined_catalog.sql?raw";
 import releaseAcceptanceMigration from "../migrations/0013_release_acceptance_status.sql?raw";
+import organizationAuthorizationMigration from "../migrations/0014_github_organization_authorization.sql?raw";
 import roadmapCatalogFixture from "./fixtures/feature-roadmap-import.json";
 import roadmapMigrationReference from "./fixtures/feature-roadmap-migration-reference.json";
 
@@ -24,13 +25,41 @@ const commitOwners = new Map<string, number>();
 const pullHeads = new Map<number, string>();
 const pullAuthors = new Map<number, number>();
 let githubPullOverrides: Record<string, unknown> = {};
-const runtimeEnv = { ...(env as any), GITHUB_REPOSITORY: "boscv/RustKore", GITHUB_REPOSITORY_ID: "1472554035", RUSTKORE_ADMIN_GITHUB_IDS: "99999", github_api: { async fetch(request: Request) {
-	const url = new URL(request.url), value = url.pathname.split("/").at(-1)!;
-	if (url.hostname === "github.com") return new Response(JSON.stringify({ access_token: "discarded-oauth-access-token" }), { status: 200 });
-	if (url.pathname === "/user") return new Response(JSON.stringify({ id: 75000, login: "external-collaborator", name: "External Collaborator", avatar_url: "https://avatars.githubusercontent.com/u/75000" }), { status: 200 });
-	if (url.pathname.includes("/pulls/")) return new Response(JSON.stringify({ user: { id: pullAuthors.get(Number(value)) ?? Number(value) }, base: { repo: { id: 1472554035, full_name: "boscv/RustKore" } }, head: { sha: githubHeadSha ?? pullHeads.get(Number(value)) ?? "" }, merged: true, merge_commit_sha: "f".repeat(40), ...githubPullOverrides }), { status: 200 });
-	return new Response(JSON.stringify({ sha: value, author: { id: commitOwners.get(value.toLowerCase()) ?? 1 } }), { status: 200 });
+const orgMemberships = new Map<string, "member" | "admin">();
+const organizationTeams = new Map<string, Set<string>>();
+const pendingTeams = new Map<string, Set<string>>();
+let organizationTeamsStatus = 200;
+let teamIdOverrides: Record<string, number> = {};
+const userIdsByLogin = new Map<string, number>([["test-admin", 99999], ["external-collaborator", 75000]]);
+let organizationRequestCount = 0;
+const runtimeEnv = { ...(env as any), GITHUB_REPOSITORY: "RustKore/RustKore", GITHUB_REPOSITORY_ID: "1472554035", GITHUB_API_TOKEN: "read-only-test-token", github_api: { async fetch(request: Request) {
+ const url = new URL(request.url), parts = url.pathname.split("/"), value = parts.at(-1)!;
+ if (url.pathname.startsWith("/orgs/RustKore")) organizationRequestCount++;
+ if (url.hostname === "github.com") return new Response(JSON.stringify({ access_token: "discarded-oauth-access-token" }), { status: 200 });
+ if (url.pathname === "/user") return new Response(JSON.stringify({ id: 75000, login: "external-collaborator", name: "External Collaborator", avatar_url: "https://avatars.githubusercontent.com/u/75000" }), { status: 200 });
+ if (url.pathname === "/orgs/RustKore") return new Response(JSON.stringify({ id: 361817169, login: "RustKore" }), { status: 200 });
+ if (url.pathname === "/orgs/RustKore/teams") return new Response(JSON.stringify([
+  { id: teamIdOverrides.Maintainers ?? 20908865, name: "Maintainers", slug: "maintainers", privacy: "closed", parent: null },
+  { id: 8002, name: "Developers", slug: "developers", privacy: "closed", parent: null },
+  { id: teamIdOverrides["Release Managers"] ?? 20908882, name: "Release Managers", slug: "release-managers", privacy: "closed", parent: null },
+ ]), { status: organizationTeamsStatus });
+ if (parts[1] === "orgs" && parts[2] === "RustKore" && parts[3] === "memberships") {
+  const login = decodeURIComponent(parts.at(-1)! ), role = orgMemberships.get(login);
+  if (!role) return new Response("{}", { status: 404 });
+  return new Response(JSON.stringify({ state: "active", role, user: { id: userIdsByLogin.get(login) ?? 0 } }), { status: 200 });
+ }
+ if (parts[1] === "orgs" && parts[2] === "RustKore" && parts[3] === "teams") {
+  const slug = parts[4], login = decodeURIComponent(parts.at(-1)! ), team = ({ maintainers: { id: teamIdOverrides.Maintainers ?? 20908865, name: "Maintainers", slug }, developers: { id: 8002, name: "Developers", slug }, "release-managers": { id: teamIdOverrides["Release Managers"] ?? 20908882, name: "Release Managers", slug } } as Record<string, any>)[slug];
+  if (!team || (!organizationTeams.get(login)?.has(team.name) && !pendingTeams.get(login)?.has(team.name))) return new Response("{}", { status: 404 });
+  return new Response(JSON.stringify({ state: pendingTeams.get(login)?.has(team.name) ? "pending" : "active", user: { id: userIdsByLogin.get(login) ?? 0 }, team }), { status: 200 });
+ }
+ if (url.pathname.includes("/pulls/")) return new Response(JSON.stringify({ user: { id: pullAuthors.get(Number(value)) ?? Number(value) }, base: { repo: { id: 1472554035, full_name: "RustKore/RustKore" } }, head: { sha: githubHeadSha ?? pullHeads.get(Number(value)) ?? "" }, merged: true, merge_commit_sha: "f".repeat(40), ...githubPullOverrides }), { status: 200 });
+ return new Response(JSON.stringify({ sha: value, author: { id: commitOwners.get(value.toLowerCase()) ?? 1 } }), { status: 200 });
 } } };
+orgMemberships.set("test-admin", "admin");
+userIdsByLogin.set("test-admin", 99999);
+orgMemberships.set("external-collaborator", "admin");
+userIdsByLogin.set("external-collaborator", 75000);
 let adminToken = "";
 
 async function request(path: string, method: string, token?: string, body?: unknown) {
@@ -55,15 +84,17 @@ async function credential(name: string, role: "collaborator" | "reviewer", agent
 	const tokenId = crypto.randomUUID(), token = `local-agent-token-${crypto.randomUUID()}`, digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
 	const tokenHash = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
 	const githubLogin = name.toLowerCase().replaceAll(" ", "-");
+ userIdsByLogin.set(githubLogin, githubUserId);
 	await db.batch([
 		db.prepare("INSERT INTO collaborators (id,name,created_at,github_user_id,github_login,reviewer_enabled) VALUES (?,?,unixepoch(),?,?,?)").bind(collaboratorId,name,githubUserId,githubLogin,role === "reviewer" ? 1 : 0),
 		...(agentId ? [db.prepare("INSERT INTO agents (id,collaborator_id,name,created_at) VALUES (?,?,?,unixepoch())").bind(agentId,collaboratorId,agentName ?? "test-agent")] : []),
-		db.prepare("INSERT INTO tokens (id,token_hash,role,collaborator_id,agent_id,created_at) VALUES (?,?,?,?,?,unixepoch())").bind(tokenId,tokenHash,role,collaboratorId,agentId),
+		db.prepare("INSERT INTO tokens (id,token_hash,role,credential_scope,collaborator_id,agent_id,created_at) VALUES (?,?,?,?,?,?,unixepoch())").bind(tokenId,tokenHash,role,role === "reviewer" ? "review" : "collaborate",collaboratorId,agentId),
 	]);
+	if (role === "reviewer") { orgMemberships.set(githubLogin, "member"); organizationTeams.set(githubLogin, new Set(["Maintainers"])); }
 	if (role === "collaborator") {
 		const commitSha = githubUserId.toString(16).padStart(40, "0"), pullNumber = githubUserId;
 		commitOwners.set(commitSha, githubUserId); pullHeads.set(pullNumber, commitSha);
-		return { token, tokenId, collaboratorId, agentId, githubUserId, commitSha, pullRequestUrl: `https://github.com/boscv/RustKore/pull/${pullNumber}` };
+		return { token, tokenId, collaboratorId, agentId, githubUserId, commitSha, pullRequestUrl: `https://github.com/RustKore/RustKore/pull/${pullNumber}` };
 	}
 	return { token, tokenId, collaboratorId, githubUserId };
 }
@@ -115,6 +146,7 @@ beforeAll(async () => {
 		{ name: "0011_feature_roadmap.sql", queries: migrationQueries(featureRoadmapMigration) },
 		{ name: "0012_feature_roadmap_refined_catalog.sql", queries: migrationQueries(refinedRoadmapMigration) },
 		{ name: "0013_release_acceptance_status.sql", queries: migrationQueries(releaseAcceptanceMigration) },
+		{ name: "0014_github_organization_authorization.sql", queries: migrationQueries(organizationAuthorizationMigration) },
 	]);
 	const collaboratorId = crypto.randomUUID(), tokenId = crypto.randomUUID();
 	adminToken = `local-admin-token-${crypto.randomUUID()}`;
@@ -122,18 +154,19 @@ beforeAll(async () => {
 	const tokenHash = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
 	await db.batch([
 		db.prepare("INSERT INTO collaborators (id,name,created_at,github_user_id,github_login) VALUES (?,?,unixepoch(),?,?)").bind(collaboratorId, "Test Admin", 99999, "test-admin"),
-		db.prepare("INSERT INTO tokens (id,token_hash,role,collaborator_id,created_at) VALUES (?,?,?, ?,unixepoch())").bind(tokenId, tokenHash, "admin", collaboratorId),
+		db.prepare("INSERT INTO tokens (id,token_hash,role,credential_scope,collaborator_id,created_at) VALUES (?,?,?,?,?,unixepoch())").bind(tokenId, tokenHash, "admin", "admin", collaboratorId),
 	]);
 });
 
 describe("RustKore coordinator and stateless MCP", () => {
 	it("rejects repository identity, base repository, and commit SHA mismatches before creating submissions", async () => {
 		const owner = await credential("Repository identity adversary", "collaborator", "repository-identity-adversary");
-		const cases: Array<{ label: string; env?: any; override?: Record<string, unknown>; shaOverride?: string }> = [
-			{ label: "platform repository", override: { base: { repo: { id: 1472413946, full_name: "boscv/RustKore-DEV" } } } },
-			{ label: "wrong repository ID", override: { base: { repo: { id: 1472413946, full_name: "boscv/RustKore" } } } },
-			{ label: "wrong repository name", override: { base: { repo: { id: 1472554035, full_name: "boscv/RustKore-DEV" } } } },
-			{ label: "missing repository ID in response", override: { base: { repo: { full_name: "boscv/RustKore" } } } },
+		const cases: Array<{ label: string; env?: any; override?: Record<string, unknown>; shaOverride?: string; pullUrl?: string }> = [
+			{ label: "platform PR URL", pullUrl: "https://github.com/RustKore/RustKore-Dev/pull/99000" },
+			{ label: "platform repository", override: { base: { repo: { id: 1472413946, full_name: "RustKore/RustKore-Dev" } } } },
+			{ label: "wrong repository ID", override: { base: { repo: { id: 1472413946, full_name: "RustKore/RustKore" } } } },
+			{ label: "wrong repository name", override: { base: { repo: { id: 1472554035, full_name: "RustKore/RustKore-Dev" } } } },
+			{ label: "missing repository ID in response", override: { base: { repo: { full_name: "RustKore/RustKore" } } } },
 			{ label: "missing repository ID configuration", env: { ...runtimeEnv, GITHUB_REPOSITORY_ID: undefined } },
 			{ label: "nonnumeric repository ID configuration", env: { ...runtimeEnv, GITHUB_REPOSITORY_ID: "rustkore" } },
 			{ label: "divergent head SHA", shaOverride: "a".repeat(40) },
@@ -143,11 +176,25 @@ describe("RustKore coordinator and stateless MCP", () => {
 			const sha = (99000 + index).toString(16).padStart(40, "0"), pullNumber = 99000 + index;
 			commitOwners.set(sha, owner.githubUserId); pullHeads.set(pullNumber, sha); pullAuthors.set(pullNumber, owner.githubUserId);
 			githubPullOverrides = testCase.override ?? {}; githubHeadSha = testCase.shaOverride ?? null;
-			const result = await tool(owner.token, "submit_task", { taskId: task.id, leaseId: claim.output.task.leaseId, commitSha: sha, pullRequestUrl: `https://github.com/boscv/RustKore/pull/${pullNumber}`, summary: testCase.label }, 1, testCase.env ?? runtimeEnv);
+			const result = await tool(owner.token, "submit_task", { taskId: task.id, leaseId: claim.output.task.leaseId, commitSha: sha, pullRequestUrl: testCase.pullUrl ?? `https://github.com/RustKore/RustKore/pull/${pullNumber}`, summary: testCase.label }, 1, testCase.env ?? runtimeEnv);
 			expect(result.body.result.isError, testCase.label).toBe(true);
 			expect((await db.prepare("SELECT COUNT(*) AS n FROM submissions WHERE commit_sha=?").bind(sha).first<any>()).n, testCase.label).toBe(0);
 		}
 		githubPullOverrides = {}; githubHeadSha = null;
+	});
+
+	it("validates and normalizes old-owner pull request URLs against the immutable software repository ID", async () => {
+		const contributor = await credential("Legacy URL contribution", "collaborator", "legacy-url-agent");
+		const task = await addTask("Legacy URL compatibility"), claim = await tool(contributor.token, "claim_task");
+		const oldUrl = contributor.pullRequestUrl.replace("RustKore/RustKore", "boscv/RustKore");
+		const submitted = await tool(contributor.token, "submit_task", { taskId: task.id, leaseId: claim.output.task.leaseId, commitSha: contributor.commitSha, pullRequestUrl: oldUrl, summary: "legacy stored link" });
+		expect(submitted.body.result.isError).not.toBe(true);
+		const stored = await db.prepare("SELECT pull_request_url AS url FROM submissions WHERE id=?").bind(submitted.output.submissionId).first<any>();
+		expect(stored.url).toBe(contributor.pullRequestUrl);
+		const duplicateTask = await addTask("Legacy URL duplicate"), duplicateClaim = await tool(contributor.token, "claim_task");
+		const duplicateSha = "b".repeat(40); commitOwners.set(duplicateSha, contributor.githubUserId); pullHeads.set(Number(contributor.githubUserId + 1), duplicateSha); pullAuthors.set(Number(contributor.githubUserId + 1), contributor.githubUserId);
+		const duplicate = await tool(contributor.token, "submit_task", { taskId: duplicateTask.id, leaseId: duplicateClaim.output.task.leaseId, commitSha: duplicateSha, pullRequestUrl: oldUrl, summary: "same pull request" });
+		expect(duplicate.body.result.isError).toBe(true);
 	});
 
 	it("serves current stateless MCP discovery and rejects cross-origin, malformed versions, and invalid commit references", async () => {
@@ -214,22 +261,110 @@ describe("RustKore coordinator and stateless MCP", () => {
 			.bind(crypto.randomUUID(), "a".repeat(64), collaboratorId).run()).rejects.toThrow(/linked GitHub identity/);
 	});
 
-	it("enforces current admin and reviewer allowlists for already issued MCP tokens", async () => {
-		expect((await rpc(adminToken, "tools/list")).response.status).toBe(200);
-		const removedAdmin = await worker.fetch(new Request("https://rustkore.test/mcp", {
-			method: "POST", headers: { authorization: `Bearer ${adminToken}`, accept: "application/json, text/event-stream", "content-type": "application/json", "mcp-protocol-version": "2025-11-25" },
-			body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-		}), { ...runtimeEnv, RUSTKORE_ADMIN_GITHUB_IDS: "99998" } as any);
-		expect(removedAdmin.status).toBe(401);
-		const reviewer = await credential("Revocable reviewer", "reviewer");
-		expect((await rpc(reviewer.token, "tools/list")).response.status).toBe(200);
-		await db.prepare("UPDATE collaborators SET reviewer_enabled=0 WHERE github_user_id=?").bind(reviewer.githubUserId).run();
-		expect((await rpc(reviewer.token, "tools/list")).response.status).toBe(401);
+	it("preserves legacy credential scope for rows written by the previous Worker during rollback", async () => {
+		const collaboratorId = crypto.randomUUID();
+		await db.prepare("INSERT INTO collaborators (id,name,created_at,github_user_id,github_login) VALUES (?,?,unixepoch(),?,?)")
+			.bind(collaboratorId, "Previous Worker owner", 88001, "previous-worker-owner").run();
+		await db.batch([
+			db.prepare("INSERT INTO tokens (id,token_hash,role,collaborator_id,created_at) VALUES (?,?, 'admin', ?,unixepoch())").bind(crypto.randomUUID(), "d".repeat(64), collaboratorId),
+			db.prepare("INSERT INTO tokens (id,token_hash,role,collaborator_id,created_at) VALUES (?,?, 'reviewer', ?,unixepoch())").bind(crypto.randomUUID(), "e".repeat(64), collaboratorId),
+		]);
+		const rows = await db.prepare("SELECT role,credential_scope AS scope FROM tokens WHERE collaborator_id=? ORDER BY role").bind(collaboratorId).all<any>();
+		expect(rows.results).toEqual([{ role: "admin", scope: "admin" }, { role: "reviewer", scope: "review" }]);
+	});
+
+	it("resolves live organization permissions and intersects them with issued credential scope", async () => {
+		const owner = await rpc(adminToken, "tools/list");
+		expect(owner.response.status).toBe(200);
+		expect((await request("/admin/credentials", "GET", adminToken)).status).toBe(200);
+		const contributor = await credential("Promoted collaborator", "collaborator", "promoted-agent");
+		orgMemberships.set("promoted-collaborator", "admin");
+		expect((await request("/admin/credentials", "GET", contributor.token)).status).toBe(403);
+		const maintainer = await credential("Org maintainer", "reviewer");
+		const release = await credential("Release manager user", "reviewer");
+		orgMemberships.set("release-manager-user", "member"); organizationTeams.set("release-manager-user", new Set(["Release Managers"]));
+		const testWithoutApiLimit = { ...runtimeEnv, API_RATE_LIMITER: undefined };
+		const releaseSession = await createWebSession(release.collaboratorId);
+		const releaseMe = await json<any>(await webRequest("/api/me", "GET", releaseSession, undefined, testWithoutApiLimit));
+		expect(releaseMe.capabilities).toContain("release");
+		expect(releaseMe.capabilities).not.toContain("maintain");
+		const dualTeam = await credential("Dual team member", "reviewer");
+		orgMemberships.set("dual-team-member", "member"); organizationTeams.set("dual-team-member", new Set(["Maintainers", "Release Managers"]));
+		const dualSession = await createWebSession(dualTeam.collaboratorId);
+		const dualMe = await json<any>(await webRequest("/api/me", "GET", dualSession, undefined, testWithoutApiLimit));
+		expect(dualMe.capabilities).toContain("maintain");
+		expect(dualMe.capabilities).toContain("release");
+		const pending = await credential("Pending maintainer", "reviewer");
+		pendingTeams.set("pending-maintainer", new Set(["Maintainers"]));
+		organizationTeams.delete("pending-maintainer");
+		const deniedPending = await tool(pending.token, "review_task", { submissionId: "missing", decision: "accepted" });
+		expect(deniedPending.body.result.isError).toBe(true);
+		expect(deniedPending.output).toMatch(/Forbidden/i);
+		const removedReviewer = await tool(maintainer.token, "review_task", { submissionId: "missing", decision: "accepted" });
+		expect(removedReviewer.body.result.isError).toBe(true);
+		organizationTeams.delete("org-maintainer");
+		const revokedReviewer = await tool(maintainer.token, "review_task", { submissionId: "missing", decision: "accepted" });
+		expect(revokedReviewer.body.result.isError).toBe(true);
+		teamIdOverrides.Maintainers = 900001;
+		organizationTeams.set("org-maintainer", new Set(["Maintainers"]));
+		const recreatedTeam = await tool(maintainer.token, "review_task", { submissionId: "missing", decision: "accepted" });
+		expect(recreatedTeam.body.result.isError).toBe(true);
+		expect(recreatedTeam.output).toMatch(/could not be confirmed/i);
+		delete teamIdOverrides.Maintainers;
+		organizationTeams.delete("org-maintainer");
+		orgMemberships.set("test-admin", "member");
+		expect((await request("/admin/context", "PUT", adminToken, { content: "must be denied after owner removal" })).status).toBe(403);
+		orgMemberships.set("test-admin", "admin");
+	});
+
+	it("keeps Owner administration available when the team directory is unavailable", async () => {
+		const owner = await db.prepare("SELECT id FROM collaborators WHERE github_login='test-admin'").first<any>();
+		const session = await createWebSession(owner.id);
+		organizationTeamsStatus = 503;
+		const response = await webRequest("/api/admin/context", "PUT", session, { content: "Owner access without team directory" }, { ...runtimeEnv, API_RATE_LIMITER: undefined });
+		expect(response.status).toBe(200);
+		organizationTeamsStatus = 200;
+	});
+
+	it("keeps common MCP work available through GitHub outages and makes no organization calls on heartbeats", async () => {
+		const contributor = await credential("Local heartbeat", "collaborator", "local-heartbeat");
+		const task = await addTask("No GitHub heartbeat");
+		const claim = await tool(contributor.token, "claim_task");
+		const before = organizationRequestCount;
+		const heartbeat = await tool(contributor.token, "heartbeat", { taskId: claim.output.task.id, leaseId: claim.output.task.leaseId });
+		expect(heartbeat.body.result.isError).not.toBe(true);
+		expect(organizationRequestCount).toBe(before);
+		const maintainer = await credential("Temporary API failure", "reviewer");
+		const failingEnv = { ...runtimeEnv, github_api: { async fetch() { return new Response("{}", { status: 401 }); } } };
+		const unavailable = await tool(maintainer.token, "review_task", { submissionId: "missing", decision: "accepted" }, 1, failingEnv);
+		expect(unavailable.body.result.isError).toBe(true);
+		expect(unavailable.output).toMatch(/GITHUB_API_TOKEN is expired or invalid/i);
+		const rateLimitedEnv = { ...runtimeEnv, github_api: { async fetch() { return new Response("{}", { status: 403, headers: { "x-ratelimit-remaining": "0" } }); } } };
+		const limited = await tool(maintainer.token, "review_task", { submissionId: "missing", decision: "accepted" }, 1, rateLimitedEnv);
+		expect(limited.body.result.isError).toBe(true);
+		expect(limited.output).toMatch(/rate limit/i);
+		const noTokenEnv = { ...runtimeEnv, GITHUB_API_TOKEN: undefined };
+		const unconfigured = await tool(maintainer.token, "review_task", { submissionId: "missing", decision: "accepted" }, 1, noTokenEnv);
+		expect(unconfigured.body.result.isError).toBe(true);
+		expect(unconfigured.output).toMatch(/GITHUB_API_TOKEN is not configured/i);
+		const common = await tool(contributor.token, "get_progress", {}, 1, failingEnv);
+		expect(common.body.result.isError).not.toBe(true);
+	});
+
+	it("keeps suspension authoritative over active GitHub membership", async () => {
+		const owner = await db.prepare("SELECT id FROM collaborators WHERE github_login='test-admin'").first<any>();
+		const ownerSession = await createWebSession(owner.id);
+		const contributor = await credential("Suspended active member", "collaborator", "suspended-agent");
+		orgMemberships.set("suspended-active-member", "member");
+		const suspended = await webRequest(`/api/admin/collaborators/${encodeURIComponent(contributor.collaboratorId)}`, "PATCH", ownerSession, { suspended: true }, { ...runtimeEnv, API_RATE_LIMITER: undefined });
+		expect(suspended.status).toBe(200);
+		const rejected = await tool(contributor.token, "get_progress");
+		expect(rejected.response.status).toBe(401);
 	});
 
 	it("links OAuth sessions and revocable MCP credentials to GitHub identity", async () => {
 		const oauthEnv = { ...runtimeEnv, GITHUB_OAUTH_CLIENT_ID: "local-client-id", GITHUB_OAUTH_CLIENT_SECRET: "local-client-secret",
-			GITHUB_OAUTH_CALLBACK_URL: "https://rustkore.test/auth/callback", RUSTKORE_ADMIN_GITHUB_IDS: "75000" };
+			GITHUB_OAUTH_CALLBACK_URL: "https://rustkore.test/auth/callback",  };
 		const started = await worker.fetch(new Request("https://rustkore.test/auth/github"), oauthEnv as any);
 		expect(started.status).toBe(302);
 		const authorize = new URL(started.headers.get("location")!);
@@ -249,6 +384,7 @@ describe("RustKore coordinator and stateless MCP", () => {
 		expect(profile.authenticated).toBe(true);
 		expect(profile.githubLogin).toBe("external-collaborator");
 		expect(profile.isAdmin).toBe(true);
+		expect(profile.capabilities).toContain("admin");
 		const forbidden = await worker.fetch(new Request("https://rustkore.test/api/tokens", { method: "POST", headers: { cookie: cookieHeader, origin: "https://attacker.test", "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify({ name: "bad-origin" }) }), oauthEnv as any);
 		expect(forbidden.status).toBe(403);
 		const created = await worker.fetch(new Request("https://rustkore.test/api/tokens", { method: "POST", headers: { cookie: cookieHeader, origin: "https://rustkore.test", "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify({ name: "external-agent" }) }), oauthEnv as any);
@@ -257,7 +393,7 @@ describe("RustKore coordinator and stateless MCP", () => {
 		const tokenIdentity = await db.prepare("SELECT c.github_user_id AS githubUserId,c.github_login AS githubLogin FROM tokens t JOIN collaborators c ON c.id=t.collaborator_id WHERE t.id=?").bind(issued.tokenId).first<any>();
 		expect(tokenIdentity).toEqual({ githubUserId: 75000, githubLogin: "external-collaborator" });
 		expect((await rpc(issued.token, "tools/list")).response.status).toBe(200);
-		const integrationSha = (75000).toString(16).padStart(40, "0"), pullNumber = 75000, pullUrl = `https://github.com/boscv/RustKore/pull/${pullNumber}`;
+		const integrationSha = (75000).toString(16).padStart(40, "0"), pullNumber = 75000, pullUrl = `https://github.com/RustKore/RustKore/pull/${pullNumber}`;
 		commitOwners.set(integrationSha, 75000); pullHeads.set(pullNumber, integrationSha);
 		const integrationTask = await addTask("OAuth verified integration", 100), claim = await tool(issued.token, "claim_task");
 		const submitted = await tool(issued.token, "submit_task", { taskId: integrationTask.id, leaseId: claim.output.task.leaseId, commitSha: integrationSha, pullRequestUrl: pullUrl, summary: "Verified implementation" });
@@ -269,7 +405,7 @@ describe("RustKore coordinator and stateless MCP", () => {
 		expect(integrated.status).toBe(200);
 		const unmergedSha = (75001).toString(16).padStart(40, "0"), unmergedTask = await addTask("Reject an unmerged pull request", 100), unmergedClaim = await tool(issued.token, "claim_task");
 		commitOwners.set(unmergedSha, 75000); pullHeads.set(75001, unmergedSha); pullAuthors.set(75001, 75000);
-		const unmergedSubmission = await tool(issued.token, "submit_task", { taskId: unmergedTask.id, leaseId: unmergedClaim.output.task.leaseId, commitSha: unmergedSha, pullRequestUrl: "https://github.com/boscv/RustKore/pull/75001", summary: "Awaiting a merge" });
+		const unmergedSubmission = await tool(issued.token, "submit_task", { taskId: unmergedTask.id, leaseId: unmergedClaim.output.task.leaseId, commitSha: unmergedSha, pullRequestUrl: "https://github.com/RustKore/RustKore/pull/75001", summary: "Awaiting a merge" });
 		const unmergedReview = await tool(independentReviewer.token, "review_task", { submissionId: unmergedSubmission.output.submissionId, decision: "accepted" });
 		expect(unmergedReview.output.decision).toBe("accepted"); githubPullOverrides = { merged: false };
 		const unmergedIntegration = await worker.fetch(new Request(`https://rustkore.test/api/admin/submissions/${unmergedSubmission.output.submissionId}/integrate`, { method: "POST", headers: { cookie: cookieHeader, origin: "https://rustkore.test", "x-csrf-token": csrf } }), oauthEnv as any);
@@ -295,6 +431,56 @@ describe("RustKore coordinator and stateless MCP", () => {
 		const revoked = await worker.fetch(new Request(`https://rustkore.test/api/tokens/${issued.tokenId}`, { method: "DELETE", headers: { cookie: cookieHeader, origin: "https://rustkore.test", "x-csrf-token": csrf } }), oauthEnv as any);
 		expect((await json<any>(revoked)).revoked).toBe(true);
 		expect((await rpc(issued.token, "tools/list")).response.status).toBe(401);
+	});
+
+	it("keeps OAuth and host-only sessions working on the canonical and legacy domains", async () => {
+		const redirectUris: string[] = [];
+		const oauthEnv = { ...runtimeEnv, GITHUB_OAUTH_CLIENT_ID: "local-client-id", GITHUB_OAUTH_CLIENT_SECRET: "local-client-secret",
+			GITHUB_OAUTH_CALLBACK_URL: "https://rustkore.dev/auth/callback", API_RATE_LIMITER: undefined, github_api: { async fetch(request: Request) {
+				if (new URL(request.url).hostname === "github.com") redirectUris.push(new URLSearchParams(new TextDecoder().decode(await request.clone().arrayBuffer())).get("redirect_uri") ?? "");
+				return runtimeEnv.github_api.fetch(request);
+			} } };
+		const origins = ["https://rustkore.dev", "https://rustkore.boscv.workers.dev"];
+		let collaboratorId: string | null = null;
+		for (const origin of origins) {
+			const started = await worker.fetch(new Request(`${origin}/auth/github`), oauthEnv as any);
+			expect(started.status).toBe(302);
+			const authorize = new URL(started.headers.get("location")!);
+			expect(authorize.searchParams.get("redirect_uri")).toBe(`${origin}/auth/callback`);
+			const state = authorize.searchParams.get("state")!, stateCookie = started.headers.get("set-cookie")!.split(";")[0];
+			const callback = await worker.fetch(new Request(`${origin}/auth/callback?code=local-code&state=${encodeURIComponent(state)}`, { headers: { cookie: stateCookie } }), oauthEnv as any);
+			expect(callback.status).toBe(303);
+			const cookies = (callback.headers as any).getSetCookie?.() ?? callback.headers.get("set-cookie")!.split(/, (?=rk_)/g);
+			const sessionCookies = cookies.filter((value: string) => value.startsWith("rk_session=") || value.startsWith("rk_csrf="));
+			expect(sessionCookies.every((value: string) => value.includes("Secure") && !value.includes("Domain="))).toBe(true);
+			const cookieHeader = sessionCookies.map((value: string) => value.split(";")[0]).join("; ");
+			const csrf = decodeURIComponent(sessionCookies.find((value: string) => value.startsWith("rk_csrf="))!.split(";")[0].split("=")[1]);
+			const me = await worker.fetch(new Request(`${origin}/api/me`, { headers: { cookie: cookieHeader } }), oauthEnv as any);
+			const profile = await json<any>(me);
+			expect(profile.githubLogin).toBe("external-collaborator");
+			expect(csrf).toBe(profile.csrfToken);
+			const row = await db.prepare("SELECT id FROM collaborators WHERE github_user_id=75000").first<{ id: string }>();
+			if (collaboratorId) expect(row?.id).toBe(collaboratorId);
+			collaboratorId = row?.id ?? null;
+			const loggedOut = await worker.fetch(new Request(`${origin}/api/logout`, { method: "POST", headers: { cookie: cookieHeader, origin, "x-csrf-token": csrf } }), oauthEnv as any);
+			expect(loggedOut.status).toBe(200);
+			expect((await json<any>(await worker.fetch(new Request(`${origin}/api/me`, { headers: { cookie: cookieHeader } }), oauthEnv as any))).authenticated).toBe(false);
+		}
+		expect(redirectUris).toEqual(origins.map(origin => `${origin}/auth/callback`));
+		expect((await db.prepare("SELECT COUNT(*) AS count FROM collaborators WHERE github_user_id=75000").first<any>()).count).toBe(1);
+		const agent = await credential("Domain MCP", "collaborator", "domain-mcp-agent");
+		for (const origin of origins) {
+			const response = await worker.fetch(new Request(`${origin}/mcp`, { method: "POST", headers: {
+				authorization: `Bearer ${agent.token}`, origin, accept: "application/json, text/event-stream", "content-type": "application/json", "mcp-protocol-version": "2025-11-25",
+			}, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }) }), { ...oauthEnv, API_RATE_LIMITER: undefined } as any);
+			expect(response.status).toBe(200);
+		}
+		const crossOriginMcp = await worker.fetch(new Request("https://rustkore.dev/mcp", { method: "POST", headers: {
+			authorization: `Bearer ${agent.token}`, origin: "https://attacker.example", accept: "application/json, text/event-stream", "content-type": "application/json",
+		}, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) }), { ...oauthEnv, API_RATE_LIMITER: undefined } as any);
+		expect(crossOriginMcp.status).toBe(403);
+		const previewLogin = await worker.fetch(new Request("https://preview-rustkore.rustkore.workers.dev/auth/github"), oauthEnv as any);
+		expect(previewLogin.status).toBe(421);
 	});
 
 	it("rejects pull requests whose head commit differs from the submitted commit", async () => {
@@ -912,6 +1098,39 @@ describe("RustKore coordinator and stateless MCP", () => {
 		const imported = await db.prepare("SELECT catalog_hash AS hash FROM roadmap_catalog_imports WHERE catalog_version=?").bind(roadmapMigrationReference.catalogVersion).first<any>();
 		const recorded = await db.prepare("SELECT json_extract(details_json,'$.catalogHash') AS hash FROM roadmap_change_history WHERE id='roadmap-catalog-1-0-1'").first<any>();
 		expect(recorded.hash).toBe(imported.hash);
+	});
+
+	it("validates canonical-host MCP lease, heartbeat, release, and submission against isolated D1", async () => {
+		const agent = await credential("Canonical MCP cycle", "collaborator", "canonical-mcp-cycle-agent");
+		githubPullOverrides = {}; githubHeadSha = null;
+		const abandonedTask = await addTask("Canonical MCP release fixture", 100), submittedTask = await addTask("Canonical MCP submission fixture", 99);
+		await db.prepare("UPDATE tasks SET created_at=1 WHERE id=?").bind(abandonedTask.id).run();
+		await db.prepare("UPDATE tasks SET status='accepted' WHERE id NOT IN (?,?)").bind(abandonedTask.id, submittedTask.id).run();
+		const mcpEnv = { ...runtimeEnv, API_RATE_LIMITER: undefined };
+		const call = async (name: string, args: Record<string, unknown>, requestId: number) => {
+			const response = await worker.fetch(new Request("https://rustkore.dev/mcp", { method: "POST", headers: {
+				authorization: `Bearer ${agent.token}`, accept: "application/json, text/event-stream", "content-type": "application/json", "mcp-protocol-version": "2025-11-25",
+			}, body: JSON.stringify({ jsonrpc: "2.0", id: requestId, method: "tools/call", params: { name, arguments: args } }) }), mcpEnv as any);
+			expect(response.status).toBe(200);
+			const body = await json<any>(response);
+			expect(body.result?.isError).not.toBe(true);
+			const content = body.result?.structuredContent ?? body.result?.content?.[0]?.text;
+			return typeof content === "string" ? JSON.parse(content) : content;
+		};
+		const releaseClaim = await call("claim_task", {}, 1);
+		expect(releaseClaim.task.id).toBe(abandonedTask.id);
+		const releasedHeartbeat = await call("heartbeat", { taskId: abandonedTask.id, leaseId: releaseClaim.task.leaseId }, 2);
+		expect(releasedHeartbeat.id).toBe(abandonedTask.id);
+		expect((await call("release_task", { taskId: abandonedTask.id, leaseId: releaseClaim.task.leaseId }, 3)).released).toBe(true);
+		await db.prepare("UPDATE tasks SET status='accepted' WHERE id=?").bind(abandonedTask.id).run();
+		const submissionClaim = await call("claim_task", {}, 4);
+		expect(submissionClaim.task.id).toBe(submittedTask.id);
+		const submittedHeartbeat = await call("heartbeat", { taskId: submittedTask.id, leaseId: submissionClaim.task.leaseId }, 5);
+		expect(submittedHeartbeat.id).toBe(submittedTask.id);
+		const submission = await call("submit_task", { taskId: submittedTask.id, leaseId: submissionClaim.task.leaseId, commitSha: agent.commitSha,
+			pullRequestUrl: agent.pullRequestUrl, summary: "Isolated D1 MCP migration validation" }, 6);
+		expect(submission.status).toBe("pending");
+		expect(await db.prepare("SELECT 1 FROM submissions WHERE id=? AND task_id=? AND status='pending'").bind(submission.submissionId, submittedTask.id).first()).toBeTruthy();
 	});
 
 
