@@ -702,7 +702,7 @@ input::placeholder, textarea::placeholder { color: #7c828a; opacity: 1; }
 .admin-empty-icon { display:grid; width:36px; height:36px; flex:none; place-items:center; color:var(--dim); }
 .admin-empty-state strong { font-size:14px; font-weight:600; }
 .admin-empty-state p { margin:4px 0 0; color:var(--dim); font-size:13px; }
-.collaborator-admin-row { display:grid; grid-template-columns:minmax(160px,.8fr) minmax(155px,.8fr) minmax(170px,.8fr) minmax(488px,1.5fr); align-items:start; gap:16px; }
+.collaborator-admin-row { display:grid; grid-template-columns:minmax(160px,.8fr) minmax(155px,.8fr) minmax(170px,.8fr) minmax(520px,1.6fr); align-items:start; gap:16px; }
 .collaborator-area { display:grid; min-width:0; align-content:start; gap:8px; }
 .collaborator-area + .collaborator-area { padding-left:16px; border-left:1px solid var(--line); }
 .collaborator-area h4 { margin:0; color:var(--muted); font-size:12px; font-weight:600; }
