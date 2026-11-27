@@ -243,6 +243,12 @@
     return {nodes,edges:paths,viewBox,marker:MARKER,card:{width:CARD_W,height:CARD_H},layout:{stepX,stepY}};
   }
   function svgEl(tag, attrs={}, text="") { const node=document.createElementNS("http://www.w3.org/2000/svg",tag);for(const [name,value] of Object.entries(attrs))node.setAttribute(name,String(value));if(text)node.textContent=text;return node; }
+  function fitSvgLabel(node, value, maxWidth) {
+    node.textContent=value;
+    if (node.getComputedTextLength() <= maxWidth) return;
+    let label=value;
+    while(label.length && node.getComputedTextLength() > maxWidth) { label=label.slice(0,-1); node.textContent=`${label.trimEnd()}…`; }
+  }
   function renderProjectMap(root, modules, relations, onSelect) {
     root.replaceChildren();if(!modules.length){const empty=document.createElement("p");empty.className="empty-state";empty.textContent="Modules will appear when tasks are registered.";root.append(empty);return {nodes:[],edges:[],viewBox:{x:0,y:0,width:48,height:48},marker:MARKER};}
     const model=buildProjectMap(modules,relations),svg=svgEl("svg",{viewBox:`${model.viewBox.x} ${model.viewBox.y} ${model.viewBox.width} ${model.viewBox.height}`,width:model.viewBox.width,height:model.viewBox.height,class:"module-map-svg",role:"group","aria-roledescription":"module dependency map","aria-label":"Module dependency map. Select a module to list its tasks."});
@@ -251,14 +257,15 @@
     const byName=new Map(modules.map(item=>[String(item.module),item]));
     for(const node of model.nodes){const item=byName.get(node.name),total=Number(item.total||0),integrated=Number(item.integrated||0),percent=total?Math.round(integrated/total*100):0,g=svgEl("g",{class:"module-map-node",role:"button",tabindex:0,"aria-label":`${node.name}: ${percent}% integrated, ${integrated} of ${total} tasks. Select to see tasks.`});
       g.append(svgEl("rect",{x:node.x,y:node.y,width:CARD_W,height:CARD_H,rx:5,class:"module-node-box"}));
-      g.append(svgEl("text",{x:node.x+16,y:node.y+28,class:"module-node-name"},node.name));
-      g.append(svgEl("text",{x:node.x+224,y:node.y+28,"text-anchor":"end",class:"module-node-percent"},`${percent}%`));
+      const name=svgEl("text",{x:node.x+16,y:node.y+28,class:"module-node-name"});g.append(name);fitSvgLabel(name,node.name,148);
+      g.append(svgEl("text",{x:node.x+224,y:node.y+28,"text-anchor":"end",class:`module-node-percent${percent===0?" module-node-percent-zero":""}`},`${percent}%`));
       g.append(svgEl("text",{x:node.x+16,y:node.y+53,class:"module-node-count"},`${integrated} of ${total} integrated`));
       g.append(svgEl("rect",{x:node.x+16,y:node.y+72,width:208,height:4,rx:2,class:"module-progress-track"}));
       g.append(svgEl("rect",{x:node.x+16,y:node.y+72,width:208*(total?integrated/total:0),height:4,rx:2,class:"module-progress-fill"}));
       const title=svgEl("title",{},`${node.name}: ${percent}% integrated; ${integrated} of ${total} tasks`);g.append(title);g.addEventListener("click",()=>onSelect?.(node.name));g.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();onSelect?.(node.name);}});svg.append(g);
     }
     const viewport=document.createElement("div");viewport.className="module-map-viewport";viewport.append(svg);root.append(viewport);
+    if(model.nodes.length===1){const note=document.createElement("p");note.className="module-map-single-note";note.textContent="Only one registered module. More modules will appear as tasks are added.";root.append(note);}
     const legend=document.createElement("div");legend.className="module-map-legend";const sample=svgEl("svg",{width:42,height:12,viewBox:"0 0 42 12","aria-hidden":"true"});sample.append(svgEl("path",{d:"M1 6 H39",fill:"none",stroke:"#a18a78","stroke-width":2,"stroke-dasharray":"6 5"}));legend.append(sample);const label=document.createElement("span");label.textContent="Prerequisite → Dependent";legend.append(label);root.append(legend);
     return model;
   }

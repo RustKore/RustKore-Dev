@@ -946,6 +946,11 @@ async function dashboardApi(request: Request, env: Env) {
 	if (!identity) return json({ error: "Authentication required" }, 401, { "cache-control": "no-store" });
 	if (["POST", "PATCH", "PUT", "DELETE"].includes(request.method)) await requireWebWrite(request, identity, db);
 	if (path.startsWith("/api/admin/roadmap/") && !identity.isAdmin) return json({ error: "Maintainer access required" }, 403);
+	if (path === "/api/admin/roadmap/catalog" && request.method === "GET") {
+		const row = await db.prepare(`SELECT catalog_version AS catalogVersion,source_revision AS sourceRevision,imported_at AS importedAt,feature_count AS totalRequirements
+			FROM roadmap_catalog_imports ORDER BY imported_at DESC,rowid DESC LIMIT 1`).first<any>();
+		return json(row ?? { catalogVersion: null, sourceRevision: null, importedAt: null, totalRequirements: 0 }, 200, { "cache-control": "no-store" });
+	}
 	if (path === "/api/admin/roadmap/import" && request.method === "POST") {
 		try { return json(await importRoadmapCatalog(db, await request.json<any>(), identity)); }
 		catch (error) { return json({ error: error instanceof Error ? error.message : "Roadmap catalog import failed" }, 400); }
@@ -1126,11 +1131,17 @@ async function dashboardApi(request: Request, env: Env) {
 	if (path === "/api/admin/context" && request.method === "PUT") {
 		const body = await request.json<any>();
 		if (typeof body.content !== "string" || body.content.length > 20_000) return json({ error: "content must be text up to 20000 characters" }, 400);
-		await db.prepare(`INSERT INTO project_context (id,content,updated_at,updated_by) VALUES ('default',?,unixepoch(),?)
-			ON CONFLICT(id) DO UPDATE SET content=excluded.content,updated_at=excluded.updated_at,updated_by=excluded.updated_by`)
-			.bind(body.content, identity.collaboratorId).run();
+		const ts=now(),changeId=id();
+		const result=await db.batch([
+			db.prepare(`INSERT INTO project_context (id,content,updated_at,updated_by) VALUES ('default',?,?,?)
+				ON CONFLICT(id) DO UPDATE SET content=excluded.content,updated_at=excluded.updated_at,updated_by=excluded.updated_by
+				WHERE project_context.content<>excluded.content RETURNING id`).bind(body.content,ts,identity.collaboratorId),
+			db.prepare(`INSERT INTO activity (id,task_id,actor_id,action,details_json,created_at)
+				SELECT ?,NULL,?,'project_context.updated',?,? WHERE changes()=1`)
+				.bind(changeId,identity.collaboratorId,JSON.stringify({language:"en"}),ts),
+		]);
 		cachedContext = null;
-		return json({ updated: true });
+		return json({ updated: (result[0].meta.changes??0)===1, auditRecorded:(result[1].meta.changes??0)===1 });
 	}
 	if (path === "/api/admin/collaborators" && request.method === "GET") {
 		const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit") ?? 50) || 50));

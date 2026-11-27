@@ -538,8 +538,17 @@ describe("RustKore coordinator and stateless MCP", () => {
 		const adminSession = await createWebSession(adminId), contributor = await credential("Recognition recipient", "collaborator", "recognition-agent"), contributorSession = await createWebSession(contributor.collaboratorId);
 		const denied = await webRequest("/api/admin/context", "GET", contributorSession);
 		expect(denied.status).toBe(403);
+		const catalogMeta = await webRequest("/api/admin/roadmap/catalog", "GET", adminSession);
+		expect(await json<any>(catalogMeta)).toMatchObject({ catalogVersion: "1.0.1", sourceRevision: expect.any(String), totalRequirements: 278 });
 		const savedContext = await webRequest("/api/admin/context", "PUT", adminSession, { content: "Local test context for dashboard." });
 		expect(savedContext.status).toBe(200);
+		expect(await json<any>(savedContext)).toMatchObject({ updated: true, auditRecorded: true });
+		const contextAudit = await db.prepare("SELECT action,actor_id AS actor,details_json AS details FROM activity WHERE action='project_context.updated' ORDER BY created_at DESC,id DESC LIMIT 1").first<any>();
+		expect(contextAudit.actor).toBe(adminId);
+		expect(contextAudit.action).toBe("project_context.updated");
+		expect(JSON.parse(contextAudit.details)).toEqual({ language: "en" });
+		const unchangedContext = await webRequest("/api/admin/context", "PUT", adminSession, { content: "Local test context for dashboard." });
+		expect(await json<any>(unchangedContext)).toMatchObject({ updated: false, auditRecorded: false });
 		const contextToken = await credential("Context verification", "collaborator", "context-reader");
 		expect((await tool(contextToken.token, "get_project_context")).output.content).toContain("Local test context");
 
