@@ -10,6 +10,7 @@ const DEFAULT_HEARTBEAT_SECONDS = 120;
 const DEFAULT_LEASE_SECONDS = 600;
 const LEGACY_PROTOCOLS = ["2025-11-25", "2025-06-18", "2025-03-26"];
 const MODERN_PROTOCOL = "2026-07-28";
+const legacyPlatformOrigin = "https://rustkore.boscv.workers.dev";
 const rateWindows = new Map<string, { start: number; count: number }>();
 let cachedContext: { content: string; updatedAt: number; expires: number } | null = null;
 let cachedDashboard: { content: any; expires: number } | null = null;
@@ -220,11 +221,20 @@ async function requireWebWrite(request: Request, identity: WebIdentity, db: D1Da
 	if (!csrf || csrf !== cookies.rk_csrf || (await sha256(csrf)) !== (identity as WebIdentity & { csrfHash: string }).csrfHash) throw new Error("Forbidden: CSRF validation failed");
 }
 
+function oauthCallbackUrl(request: Request, env: Env) {
+	if (!env.GITHUB_OAUTH_CALLBACK_URL) return null;
+	const configured = new URL(env.GITHUB_OAUTH_CALLBACK_URL), origin = new URL(request.url).origin;
+	if ((configured.protocol !== "https:" && !["localhost", "127.0.0.1", "[::1]"].includes(configured.hostname)) || configured.pathname !== "/auth/callback" || configured.search || configured.hash) return null;
+	if (origin === configured.origin) return configured.toString();
+	if (origin === legacyPlatformOrigin) return `${legacyPlatformOrigin}/auth/callback`;
+	return null;
+}
+
 async function startGitHubLogin(request: Request, env: Env) {
 	if (!env.GITHUB_OAUTH_CLIENT_ID || !env.GITHUB_OAUTH_CALLBACK_URL) return json({ error: "GitHub OAuth is not configured" }, 503);
+	const callbackUrl = oauthCallbackUrl(request, env);
+	if (!callbackUrl) return json({ error: "GitHub sign-in is unavailable on this host" }, 421);
 	if (await anonymousRateLimited(request, env, "oauth")) return json({ error: "Rate limit exceeded" }, 429);
-	const callback = new URL(env.GITHUB_OAUTH_CALLBACK_URL);
-	if (callback.protocol !== "https:" && callback.hostname !== "localhost" && callback.hostname !== "127.0.0.1") return json({ error: "OAuth callback must use HTTPS" }, 500);
 	const state = randomSecret(), verifier = randomSecret(48), challenge = base64url(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))));
 	await env.rustkore_db.batch([
 		env.rustkore_db.prepare("DELETE FROM oauth_states WHERE expires_at<=unixepoch()"),
@@ -232,7 +242,7 @@ async function startGitHubLogin(request: Request, env: Env) {
 	]);
 	const authorize = new URL("https://github.com/login/oauth/authorize");
 	authorize.searchParams.set("client_id", env.GITHUB_OAUTH_CLIENT_ID);
-	authorize.searchParams.set("redirect_uri", callback.toString());
+	authorize.searchParams.set("redirect_uri", callbackUrl);
 	authorize.searchParams.set("scope", "read:user");
 	authorize.searchParams.set("state", state);
 	authorize.searchParams.set("code_challenge", challenge);
@@ -242,13 +252,15 @@ async function startGitHubLogin(request: Request, env: Env) {
 
 async function completeGitHubLogin(request: Request, env: Env) {
 	if (!env.GITHUB_OAUTH_CLIENT_ID || !env.GITHUB_OAUTH_CLIENT_SECRET || !env.GITHUB_OAUTH_CALLBACK_URL) return json({ error: "GitHub OAuth is not configured" }, 503);
+	const callbackUrl = oauthCallbackUrl(request, env);
+	if (!callbackUrl) return json({ error: "GitHub sign-in is unavailable on this host" }, 421);
 	if (await anonymousRateLimited(request, env, "oauth-callback")) return json({ error: "Rate limit exceeded" }, 429);
 	const url = new URL(request.url), cookies = parseCookies(request), state = url.searchParams.get("state"), code = url.searchParams.get("code");
 	if (url.searchParams.has("error") || !state || !code || !cookies.rk_oauth_state || state !== cookies.rk_oauth_state) return json({ error: "GitHub authorization was denied or its state is invalid" }, 400);
 	const stateRow = await env.rustkore_db.prepare("SELECT code_verifier AS codeVerifier FROM oauth_states WHERE state_hash=? AND expires_at>unixepoch()")
 		.bind(await sha256(state)).first<{ codeVerifier: string }>();
 	if (!stateRow) return json({ error: "GitHub authorization expired; start again" }, 400);
-	const tokenRequest = new URLSearchParams({ client_id: env.GITHUB_OAUTH_CLIENT_ID, client_secret: env.GITHUB_OAUTH_CLIENT_SECRET, code, redirect_uri: env.GITHUB_OAUTH_CALLBACK_URL, code_verifier: stateRow.codeVerifier });
+	const tokenRequest = new URLSearchParams({ client_id: env.GITHUB_OAUTH_CLIENT_ID, client_secret: env.GITHUB_OAUTH_CLIENT_SECRET, code, redirect_uri: callbackUrl, code_verifier: stateRow.codeVerifier });
 	const tokenResponse = await githubFetch(new Request("https://github.com/login/oauth/access_token", { method: "POST", headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" }, body: tokenRequest }), env);
 	if (!tokenResponse.ok) return json({ error: "GitHub authorization could not be completed" }, 502);
 	const token = await tokenResponse.json<any>();

@@ -433,6 +433,56 @@ describe("RustKore coordinator and stateless MCP", () => {
 		expect((await rpc(issued.token, "tools/list")).response.status).toBe(401);
 	});
 
+	it("keeps OAuth and host-only sessions working on the canonical and legacy domains", async () => {
+		const redirectUris: string[] = [];
+		const oauthEnv = { ...runtimeEnv, GITHUB_OAUTH_CLIENT_ID: "local-client-id", GITHUB_OAUTH_CLIENT_SECRET: "local-client-secret",
+			GITHUB_OAUTH_CALLBACK_URL: "https://rustkore.dev/auth/callback", API_RATE_LIMITER: undefined, github_api: { async fetch(request: Request) {
+				if (new URL(request.url).hostname === "github.com") redirectUris.push(new URLSearchParams(new TextDecoder().decode(await request.clone().arrayBuffer())).get("redirect_uri") ?? "");
+				return runtimeEnv.github_api.fetch(request);
+			} } };
+		const origins = ["https://rustkore.dev", "https://rustkore.boscv.workers.dev"];
+		let collaboratorId: string | null = null;
+		for (const origin of origins) {
+			const started = await worker.fetch(new Request(`${origin}/auth/github`), oauthEnv as any);
+			expect(started.status).toBe(302);
+			const authorize = new URL(started.headers.get("location")!);
+			expect(authorize.searchParams.get("redirect_uri")).toBe(`${origin}/auth/callback`);
+			const state = authorize.searchParams.get("state")!, stateCookie = started.headers.get("set-cookie")!.split(";")[0];
+			const callback = await worker.fetch(new Request(`${origin}/auth/callback?code=local-code&state=${encodeURIComponent(state)}`, { headers: { cookie: stateCookie } }), oauthEnv as any);
+			expect(callback.status).toBe(303);
+			const cookies = (callback.headers as any).getSetCookie?.() ?? callback.headers.get("set-cookie")!.split(/, (?=rk_)/g);
+			const sessionCookies = cookies.filter((value: string) => value.startsWith("rk_session=") || value.startsWith("rk_csrf="));
+			expect(sessionCookies.every((value: string) => value.includes("Secure") && !value.includes("Domain="))).toBe(true);
+			const cookieHeader = sessionCookies.map((value: string) => value.split(";")[0]).join("; ");
+			const csrf = decodeURIComponent(sessionCookies.find((value: string) => value.startsWith("rk_csrf="))!.split(";")[0].split("=")[1]);
+			const me = await worker.fetch(new Request(`${origin}/api/me`, { headers: { cookie: cookieHeader } }), oauthEnv as any);
+			const profile = await json<any>(me);
+			expect(profile.githubLogin).toBe("external-collaborator");
+			expect(csrf).toBe(profile.csrfToken);
+			const row = await db.prepare("SELECT id FROM collaborators WHERE github_user_id=75000").first<{ id: string }>();
+			if (collaboratorId) expect(row?.id).toBe(collaboratorId);
+			collaboratorId = row?.id ?? null;
+			const loggedOut = await worker.fetch(new Request(`${origin}/api/logout`, { method: "POST", headers: { cookie: cookieHeader, origin, "x-csrf-token": csrf } }), oauthEnv as any);
+			expect(loggedOut.status).toBe(200);
+			expect((await json<any>(await worker.fetch(new Request(`${origin}/api/me`, { headers: { cookie: cookieHeader } }), oauthEnv as any))).authenticated).toBe(false);
+		}
+		expect(redirectUris).toEqual(origins.map(origin => `${origin}/auth/callback`));
+		expect((await db.prepare("SELECT COUNT(*) AS count FROM collaborators WHERE github_user_id=75000").first<any>()).count).toBe(1);
+		const agent = await credential("Domain MCP", "collaborator", "domain-mcp-agent");
+		for (const origin of origins) {
+			const response = await worker.fetch(new Request(`${origin}/mcp`, { method: "POST", headers: {
+				authorization: `Bearer ${agent.token}`, origin, accept: "application/json, text/event-stream", "content-type": "application/json", "mcp-protocol-version": "2025-11-25",
+			}, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }) }), { ...oauthEnv, API_RATE_LIMITER: undefined } as any);
+			expect(response.status).toBe(200);
+		}
+		const crossOriginMcp = await worker.fetch(new Request("https://rustkore.dev/mcp", { method: "POST", headers: {
+			authorization: `Bearer ${agent.token}`, origin: "https://attacker.example", accept: "application/json, text/event-stream", "content-type": "application/json",
+		}, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) }), { ...oauthEnv, API_RATE_LIMITER: undefined } as any);
+		expect(crossOriginMcp.status).toBe(403);
+		const previewLogin = await worker.fetch(new Request("https://preview-rustkore.rustkore.workers.dev/auth/github"), oauthEnv as any);
+		expect(previewLogin.status).toBe(421);
+	});
+
 	it("rejects pull requests whose head commit differs from the submitted commit", async () => {
 		const contributor = await credential("PR integrity", "collaborator", "pr-integrity-agent");
 		const task = await addTask("PR commit integrity");
@@ -1048,6 +1098,39 @@ describe("RustKore coordinator and stateless MCP", () => {
 		const imported = await db.prepare("SELECT catalog_hash AS hash FROM roadmap_catalog_imports WHERE catalog_version=?").bind(roadmapMigrationReference.catalogVersion).first<any>();
 		const recorded = await db.prepare("SELECT json_extract(details_json,'$.catalogHash') AS hash FROM roadmap_change_history WHERE id='roadmap-catalog-1-0-1'").first<any>();
 		expect(recorded.hash).toBe(imported.hash);
+	});
+
+	it("validates canonical-host MCP lease, heartbeat, release, and submission against isolated D1", async () => {
+		const agent = await credential("Canonical MCP cycle", "collaborator", "canonical-mcp-cycle-agent");
+		githubPullOverrides = {}; githubHeadSha = null;
+		const abandonedTask = await addTask("Canonical MCP release fixture", 100), submittedTask = await addTask("Canonical MCP submission fixture", 99);
+		await db.prepare("UPDATE tasks SET created_at=1 WHERE id=?").bind(abandonedTask.id).run();
+		await db.prepare("UPDATE tasks SET status='accepted' WHERE id NOT IN (?,?)").bind(abandonedTask.id, submittedTask.id).run();
+		const mcpEnv = { ...runtimeEnv, API_RATE_LIMITER: undefined };
+		const call = async (name: string, args: Record<string, unknown>, requestId: number) => {
+			const response = await worker.fetch(new Request("https://rustkore.dev/mcp", { method: "POST", headers: {
+				authorization: `Bearer ${agent.token}`, accept: "application/json, text/event-stream", "content-type": "application/json", "mcp-protocol-version": "2025-11-25",
+			}, body: JSON.stringify({ jsonrpc: "2.0", id: requestId, method: "tools/call", params: { name, arguments: args } }) }), mcpEnv as any);
+			expect(response.status).toBe(200);
+			const body = await json<any>(response);
+			expect(body.result?.isError).not.toBe(true);
+			const content = body.result?.structuredContent ?? body.result?.content?.[0]?.text;
+			return typeof content === "string" ? JSON.parse(content) : content;
+		};
+		const releaseClaim = await call("claim_task", {}, 1);
+		expect(releaseClaim.task.id).toBe(abandonedTask.id);
+		const releasedHeartbeat = await call("heartbeat", { taskId: abandonedTask.id, leaseId: releaseClaim.task.leaseId }, 2);
+		expect(releasedHeartbeat.id).toBe(abandonedTask.id);
+		expect((await call("release_task", { taskId: abandonedTask.id, leaseId: releaseClaim.task.leaseId }, 3)).released).toBe(true);
+		await db.prepare("UPDATE tasks SET status='accepted' WHERE id=?").bind(abandonedTask.id).run();
+		const submissionClaim = await call("claim_task", {}, 4);
+		expect(submissionClaim.task.id).toBe(submittedTask.id);
+		const submittedHeartbeat = await call("heartbeat", { taskId: submittedTask.id, leaseId: submissionClaim.task.leaseId }, 5);
+		expect(submittedHeartbeat.id).toBe(submittedTask.id);
+		const submission = await call("submit_task", { taskId: submittedTask.id, leaseId: submissionClaim.task.leaseId, commitSha: agent.commitSha,
+			pullRequestUrl: agent.pullRequestUrl, summary: "Isolated D1 MCP migration validation" }, 6);
+		expect(submission.status).toBe("pending");
+		expect(await db.prepare("SELECT 1 FROM submissions WHERE id=? AND task_id=? AND status='pending'").bind(submission.submissionId, submittedTask.id).first()).toBeTruthy();
 	});
 
 

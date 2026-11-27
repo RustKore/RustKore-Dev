@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#111315">
 <meta name="description" content="A community-driven reimplementation of OpenKore, focused on performance, reliability, maintainability and a modern architecture.">
+<link rel="canonical" href="https://rustkore.dev/">
 <title>RustKore | Rebuilding OpenKore in Rust</title>
 <link rel="stylesheet" href="/styles.css">
 <script src="/project-map.js" defer></script>
@@ -126,12 +127,12 @@
   <section class="section get-started-section" id="get-started" aria-labelledby="get-started-heading">
     <div class="section-heading"><div><p class="section-kicker">07 / GET STARTED</p><h2 id="get-started-heading">Contribute at your pace</h2></div><p class="section-aside">Human contributors remain the authors of record, regardless of the tools they use.</p></div>
     <div class="onboarding-grid"><ol class="onboarding-steps"><li><strong>Sign in with GitHub</strong><span>Connect your contributor identity.</span></li><li><strong>Create an MCP credential</strong><span>Issue and revoke tokens from your account.</span></li><li><strong>Configure an MCP-compatible client</strong><span>Streamable HTTP connects your agent to the coordinator.</span></li><li><strong>Verify the connection</strong><span>Call <code>list_tasks</code> to confirm access before choosing work.</span></li><li><strong>Choose a task through RustKore-DEV</strong><span>Start with a size and scope that fits your availability.</span></li><li><strong>Implement and validate</strong><span>Keep changes and tests in the RustKore software repository.</span></li><li><strong>Submit for independent review</strong><span>Accepted contributions are integrated separately by a maintainer.</span></li></ol>
-      <div class="connect-card"><div class="connect-heading"><div><span class="section-kicker">MCP CONNECTION</span><h3>Connect your agent</h3></div><span class="transport-tag">Streamable HTTP</span></div><dl class="connection-details"><div><dt>Server name</dt><dd><code>rustkore</code><button type="button" class="copy-button" data-copy="rustkore">Copy</button></dd></div><div><dt>Endpoint</dt><dd><code>https://rustkore.boscv.workers.dev/mcp</code><button type="button" class="copy-button" data-copy="https://rustkore.boscv.workers.dev/mcp">Copy</button></dd></div><div><dt>Authentication</dt><dd><code>Bearer token</code><button type="button" class="copy-button" data-copy="Bearer Token">Copy</button></dd></div><div><dt>Environment variable</dt><dd><code>RUSTKORE_TOKEN</code><button type="button" class="copy-button" data-copy="RUSTKORE_TOKEN">Copy</button></dd></div></dl>
+      <div class="connect-card"><div class="connect-heading"><div><span class="section-kicker">MCP CONNECTION</span><h3>Connect your agent</h3></div><span class="transport-tag">Streamable HTTP</span></div><dl class="connection-details"><div><dt>Server name</dt><dd><code>rustkore</code><button type="button" class="copy-button" data-copy="rustkore">Copy</button></dd></div><div><dt>Endpoint</dt><dd><code>https://rustkore.dev/mcp</code><button type="button" class="copy-button" data-copy="https://rustkore.dev/mcp">Copy</button></dd></div><div><dt>Authentication</dt><dd><code>Bearer token</code><button type="button" class="copy-button" data-copy="Bearer Token">Copy</button></dd></div><div><dt>Environment variable</dt><dd><code>RUSTKORE_TOKEN</code><button type="button" class="copy-button" data-copy="RUSTKORE_TOKEN">Copy</button></dd></div></dl>
       <div class="generic-config"><div class="code-heading"><span>Illustrative client configuration</span><button type="button" class="copy-button" data-copy-target="mcp-example">Copy example</button></div><pre><code id="mcp-example">{
   "mcpServers": {
     "rustkore": {
       "type": "http",
-      "url": "https://rustkore.boscv.workers.dev/mcp",
+      "url": "https://rustkore.dev/mcp",
       "headers": {
         "Authorization": "Bearer ${RUSTKORE_TOKEN}"
       }
