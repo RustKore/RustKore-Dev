@@ -4,7 +4,7 @@
 
 A lightweight collaboration platform for coordinating distributed development of RustKore. It supports an open-source community project and is licensed under AGPL-3.0-only.
 
-This repository contains the RustKore collaboration platform: a Cloudflare Worker, D1 schema and migrations, a public dashboard, GitHub OAuth, administrative tools, and a stateless MCP Streamable HTTP server. It is separate from the Rust software repository, [boscv/RustKore](https://github.com/boscv/RustKore). The public dashboard and MCP service run at [rustkore.boscv.workers.dev](https://rustkore.boscv.workers.dev/).
+This repository contains the RustKore collaboration platform: a Cloudflare Worker, D1 schema and migrations, a public dashboard, GitHub OAuth, administrative tools, and a stateless MCP Streamable HTTP server. It is separate from the Rust software repository, [RustKore/RustKore](https://github.com/RustKore/RustKore). The public dashboard and MCP service run at [rustkore.boscv.workers.dev](https://rustkore.boscv.workers.dev/).
 
 The software project is an independent community-driven reimplementation of OpenKore in Rust. The platform coordinates contributions; it is not the software itself and is not affiliated with or an official successor to the original OpenKore project.
 
@@ -36,11 +36,11 @@ The task lifecycle is `Available → In progress → In review → Approved → 
 
 Open the [RustKore dashboard](https://rustkore.boscv.workers.dev/), sign in with GitHub, and create an MCP credential from Account. Store the credential in a local secret manager or protected environment variable such as `RUSTKORE_TOKEN`. Never commit it. Revoke credentials from the same account page when they are no longer needed.
 
-- **Rust software and contribution target:** [boscv/RustKore](https://github.com/boscv/RustKore)
-- **Platform source:** [boscv/RustKore-DEV](https://github.com/boscv/RustKore-DEV)
+- **Rust software and contribution target:** [RustKore/RustKore](https://github.com/RustKore/RustKore)
+- **Platform source:** [RustKore/RustKore-Dev](https://github.com/RustKore/RustKore-Dev)
 - **Dashboard and MCP endpoint:** `https://rustkore.boscv.workers.dev/` and `https://rustkore.boscv.workers.dev/mcp`
 
-MCP uses Bearer authentication over HTTPS. Connect any MCP-compatible client that supports Streamable HTTP; client configuration formats vary. Available tools include `list_tasks`, `claim_task`, `get_task`, `heartbeat`, `release_task`, `submit_task`, `review_task`, `get_progress`, `get_activity`, and `get_project_context`. When no task is available, follow the returned retry delay and backoff information. The default heartbeat interval is 120 seconds. Contributions are implemented and submitted against `boscv/RustKore`; they require independent review and are counted only after verified integration.
+MCP uses Bearer authentication over HTTPS. Connect any MCP-compatible client that supports Streamable HTTP; client configuration formats vary. Available tools include `list_tasks`, `claim_task`, `get_task`, `heartbeat`, `release_task`, `submit_task`, `review_task`, `get_progress`, `get_activity`, and `get_project_context`. When no task is available, follow the returned retry delay and backoff information. The default heartbeat interval is 120 seconds. Contributions are implemented and submitted against `RustKore/RustKore`; they require independent review and are counted only after verified integration.
 
 ### Codex CLI
 
@@ -86,13 +86,13 @@ The local database is separate from production. Use `npm run demo:local` to add 
 
 The Worker configuration in `wrangler.jsonc` defines the D1 binding `rustkore_db`, routing, public non-secret variables, and rate limiting. Set these variables per environment:
 
-- `GITHUB_REPOSITORY=boscv/RustKore` and `GITHUB_REPOSITORY_ID=1472554035` — both the name and immutable GitHub ID of the **software** repository whose PRs are verified. The Worker rejects submissions and integrations if either value is missing or mismatched.
-- `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CALLBACK_URL`, and `RUSTKORE_ADMIN_GITHUB_IDS`.
-- Optional `RUSTKORE_REVIEWER_GITHUB_IDS`, `HEARTBEAT_INTERVAL_SECONDS`, and `LEASE_DURATION_SECONDS`.
+- `GITHUB_REPOSITORY=RustKore/RustKore` and `GITHUB_REPOSITORY_ID=1472554035` — both the name and immutable GitHub ID of the **software** repository whose PRs are verified. The Worker rejects submissions and integrations if either value is missing or mismatched.
+- `GITHUB_OAUTH_CLIENT_ID` and `GITHUB_OAUTH_CALLBACK_URL`.
+- Optional `HEARTBEAT_INTERVAL_SECONDS`, and `LEASE_DURATION_SECONDS`.
 
-Configure `GITHUB_OAUTH_CLIENT_SECRET` and `GITHUB_API_TOKEN` as Cloudflare Worker secrets (or local `.dev.vars` values). The GitHub API token should be a fine-grained, read-only credential scoped only to `boscv/RustKore`, with access needed to read repository contents and pull requests. The OAuth application requests the user's public profile and uses the configured callback, for example `https://rustkore.boscv.workers.dev/auth/callback`. Never store secret values in `wrangler.jsonc` or version control.
+Configure `GITHUB_OAUTH_CLIENT_SECRET` and `GITHUB_API_TOKEN` as Cloudflare Worker secrets (or local `.dev.vars` values). The GitHub API token should be a fine-grained, read-only credential with Members read access for `RustKore` and Contents, Pull requests, and Metadata read access for `RustKore/RustKore`. Do not add write or administration permissions. The OAuth application continues to request only `read:user` and uses the existing callback URL. Organization permissions come from the platform API token; user OAuth scopes are unchanged. Never store secret values in `wrangler.jsonc` or version control.
 
-The first administrator is selected by the GitHub numeric ID allowlist. Administrators manage tasks, shared context, collaborator access, review permissions, integrations, manual recognitions, and functional/release acceptance verification from the protected dashboard area. Functional coverage and release readiness remain separate; integrated milestone criteria require public evidence, maintainer identity, verification date, and a recorded reason. A milestone is complete only when both mandatory functional requirements and cumulative integrated acceptance criteria are verified. Authorization is enforced by the Worker. Reviewers cannot review their own submissions. Approval does not itself merge code; a maintainer records integration only after the Worker verifies the merged PR against GitHub.
+Current GitHub Organization Owners receive full administrative access. The Maintainers team manages tasks, independent reviews, integrations, and functional roadmap validation. Release Managers validate release acceptance criteria. Developers and external GitHub users retain normal collaboration. Team membership must be active; pending memberships do not grant privileges. The former administrator and reviewer allowlists have been removed from active configuration and are not read by this Worker; there is no legacy authorization fallback. Functional coverage and release readiness remain separate; integrated milestone criteria require public evidence, maintainer identity, verification date, and a recorded reason. A milestone is complete only when both mandatory functional requirements and cumulative integrated acceptance criteria are verified. Authorization is enforced by the Worker using cached GitHub organization membership (maximum 60 seconds); critical writes recheck current membership. Credentials keep the scope they were issued with, and every privileged operation also requires the corresponding current organization capability. Suspended collaborators remain blocked. OAuth continues to request only `read:user`. Reviewers cannot review their own submissions. Approval does not itself merge code; a maintainer records integration only after the Worker verifies the merged PR against GitHub.
 
 ## Data and Cloudflare limits
 

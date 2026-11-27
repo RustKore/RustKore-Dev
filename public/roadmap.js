@@ -4,7 +4,7 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const $ = (selector) => document.querySelector(selector);
 const stateName = { planned: "Planned", developing: "Developing", testing: "Testing", verified: "Verified" };
 const stateOrder = ["planned", "developing", "testing", "verified"];
-let roadmap = null, categories = [], featureCursor = null, expandedCell = null, expandedFeatures = [], isAdmin = false, csrf = "", historyCursor = null, activeAcceptanceCriterion = null, acceptanceBaseline = null;
+let roadmap = null, categories = [], featureCursor = null, expandedCell = null, expandedFeatures = [], canMaintain = false, canRelease = false, csrf = "", historyCursor = null, activeAcceptanceCriterion = null, acceptanceBaseline = null;
 const query = new URLSearchParams(location.search), localHost = ["localhost", "127.0.0.1", "::1"].includes(location.hostname);
 let scenario = localHost && query.get("scenario") === "demo" ? "demo" : "actual";
 
@@ -217,7 +217,7 @@ function openAcceptanceEditor(criterion) {
 
 function renderAcceptanceEditor(criteria) {
 	const editor = $("#acceptance-editor");
-	if (!isAdmin || scenario !== "actual" || !activeAcceptanceCriterion || !criteria.some((item) => item.id === activeAcceptanceCriterion.id)) { closeAcceptanceEditor(); return; }
+	if (!canRelease || scenario !== "actual" || !activeAcceptanceCriterion || !criteria.some((item) => item.id === activeAcceptanceCriterion.id)) { closeAcceptanceEditor(); return; }
 	editor.hidden = false;
 }
 
@@ -272,13 +272,13 @@ function renderFeature(feature) {
 	if (feature.acceptanceCriteria?.length) { item.append(node("strong", "", "Acceptance criteria")); const list = node("ul"); feature.acceptanceCriteria.forEach((text) => list.append(node("li", "", text))); item.append(list); }
 	if (feature.tasks?.length) {
 		const box = node("div", "feature-tasks"); box.append(node("strong", "", "Related tasks")); const list = node("ul");
-		feature.tasks.forEach((task) => { const li = node("li"), link = node("a", "", `${task.id} · ${task.title}`); link.href = `/#task/${encodeURIComponent(task.id)}`; li.append(link); if (isAdmin && feature.scenario !== "demo") { const unlink = node("button", "button button-quiet", "Unlink"); unlink.type = "button"; unlink.addEventListener("click", async () => { try { await request(`/api/admin/roadmap/features/${encodeURIComponent(feature.id)}/tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" }); notice("Task unlinked."); await refresh(); } catch (error) { notice(error.message); } }); li.append(unlink); } list.append(li); }); box.append(list); item.append(box);
+		feature.tasks.forEach((task) => { const li = node("li"), link = node("a", "", `${task.id} · ${task.title}`); link.href = `/#task/${encodeURIComponent(task.id)}`; li.append(link); if (canMaintain && feature.scenario !== "demo") { const unlink = node("button", "button button-quiet", "Unlink"); unlink.type = "button"; unlink.addEventListener("click", async () => { try { await request(`/api/admin/roadmap/features/${encodeURIComponent(feature.id)}/tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" }); notice("Task unlinked."); await refresh(); } catch (error) { notice(error.message); } }); li.append(unlink); } list.append(li); }); box.append(list); item.append(box);
 	}
 	if (feature.evidence?.length) {
 		const box = node("div", "feature-evidence"); box.append(node("strong", "", "Public validation evidence")); const list = node("ul");
-		feature.evidence.forEach((evidence) => { const li = node("li"), link = node("a", "", evidence.label); link.href = evidence.url; link.target = "_blank"; link.rel = "noreferrer"; li.append(link, node("span", "", ` · ${evidence.description} · @${evidence.createdBy}`)); if (isAdmin && feature.scenario !== "demo") { const invalidate = node("button", "button button-quiet", "Invalidate evidence"); invalidate.type = "button"; invalidate.addEventListener("click", async () => { const reason = prompt("Reason for invalidating this evidence (at least 8 characters):"); if (reason === null) return; try { await request(`/api/admin/roadmap/evidence/${encodeURIComponent(evidence.id)}`, { method: "PATCH", body: JSON.stringify({ valid: false, reason }) }); notice("Evidence invalidated."); await refresh(); } catch (error) { notice(error.message); } }); li.append(invalidate); } list.append(li); }); box.append(list); item.append(box);
+		feature.evidence.forEach((evidence) => { const li = node("li"), link = node("a", "", evidence.label); link.href = evidence.url; link.target = "_blank"; link.rel = "noreferrer"; li.append(link, node("span", "", ` · ${evidence.description} · @${evidence.createdBy}`)); if (canMaintain && feature.scenario !== "demo") { const invalidate = node("button", "button button-quiet", "Invalidate evidence"); invalidate.type = "button"; invalidate.addEventListener("click", async () => { const reason = prompt("Reason for invalidating this evidence (at least 8 characters):"); if (reason === null) return; try { await request(`/api/admin/roadmap/evidence/${encodeURIComponent(evidence.id)}`, { method: "PATCH", body: JSON.stringify({ valid: false, reason }) }); notice("Evidence invalidated."); await refresh(); } catch (error) { notice(error.message); } }); li.append(invalidate); } list.append(li); }); box.append(list); item.append(box);
 	}
-	if (isAdmin && feature.scenario !== "demo") item.append(renderAdminControls(feature));
+	if (canMaintain && feature.scenario !== "demo") item.append(renderAdminControls(feature));
 	return item;
 }
 
@@ -329,9 +329,9 @@ function renderAcceptance() {
 	const criteria = selected.acceptanceCriteria || [];
 	if (!criteria.length) { closeAcceptanceEditor(); const empty = node("li", "acceptance-empty", "No release acceptance checklist is defined for this milestone yet."); list.append(empty); return; }
 	criteria.forEach((criterion) => {
-		const item = node("li", `acceptance-item${isAdmin && scenario === "actual" ? " acceptance-item-admin" : ""}`), state = criterion.state || "planned";
+		const item = node("li", `acceptance-item${canRelease && scenario === "actual" ? " acceptance-item-admin" : ""}`), state = criterion.state || "planned";
 		item.append(stateIcon(state), node("span", "acceptance-description", criterion.description), node("span", "acceptance-state", stateName[state] || "Planned"));
-		if (isAdmin && scenario === "actual") {
+		if (canRelease && scenario === "actual") {
 			const edit = node("button", "acceptance-edit", ""); edit.type = "button"; edit.title = "Edit acceptance criterion"; edit.setAttribute("aria-label", "Edit acceptance criterion");
 			const pencil = svgElement("svg", { viewBox: "0 0 24 24", width: 16, height: 16, "aria-hidden": "true", focusable: "false" }); pencil.append(svgElement("path", { d: "M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z" })); edit.append(pencil);
 			edit.addEventListener("click", () => openAcceptanceEditor(criterion)); item.append(edit);
@@ -384,7 +384,7 @@ async function init() {
 		}
 		$("#scenario-banner").hidden = scenario !== "demo";
 		const session = await request("/api/me");
-		if (session.authenticated) { csrf = session.csrfToken || ""; isAdmin = Boolean(session.isAdmin); $("#roadmap-login").hidden = true; $("#roadmap-account-link").hidden = false; if (isAdmin) { $("#roadmap-admin").hidden = false; $("#roadmap-admin-link").hidden = false; } }
+		if (session.authenticated) { csrf = session.csrfToken || ""; canMaintain = session.capabilities?.includes("maintain") || session.capabilities?.includes("admin"); canRelease = session.capabilities?.includes("release") || session.capabilities?.includes("admin"); $("#roadmap-login").hidden = true; $("#roadmap-account-link").hidden = false; if (canMaintain || canRelease) { $("#roadmap-admin").hidden = false; $("#roadmap-admin-link").hidden = false; } }
 		roadmap = await request(`/api/roadmap${scenario === "demo" ? "?scenario=demo" : ""}`); categories = roadmap.categories;
 		window.selectedMilestoneIndex = Math.max(0, roadmap.milestones.findIndex((milestone) => milestone.status === "planned"));
 		updateFilterOptions(); renderHeroContent(); renderMilestones(); renderAcceptance(); renderTable();
